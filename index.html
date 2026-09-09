@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Swing</title>
+  <title>Swinicorn</title>
   <style>
     body {
       margin: 0;
@@ -23,7 +23,7 @@
   <canvas id="screen" width="320" height="180"></canvas>
   <script>
     // ---------------------------------------------------------------------
-    // Swing — a unicorn swings on a candy-cane rope between layer-cake towers.
+    // Swinicorn — a unicorn swings on a candy-cane rope between layer-cake towers.
     // Hold to walk back and stretch the rope, release to swing. Land on the
     // next tower; hit its center for a PERFECT.
     // ---------------------------------------------------------------------
@@ -243,7 +243,7 @@
         scorePop = 1;
         squash = 1;
         popups.push({
-          text: perfect ? (combo > 1 ? "x" + combo + " PERFECT" : "+2 PERFECT") : "+1",
+          text: perfect ? "+2 PERFECT" + (combo > 1 ? " X" + combo : "") : "+1",
           x, y: player.y - 90, life: 0.8, rainbow: perfect,
         });
         // Landing dust; a PERFECT adds a rainbow burst, flash, shake and hit-stop.
@@ -437,15 +437,15 @@
       }
       ctx.globalAlpha = 1;
 
-      // Lollipop sun
+      // Lollipop sun, top right so it stays clear of the logo
       ctx.fillStyle = "#fff";
-      ctx.fillRect(78, 70, 6, 60);
+      ctx.fillRect(582, 70, 6, 60);
       ctx.fillStyle = pal[1];
       ctx.beginPath();
-      ctx.arc(80, 60, 28, 0, 7);
+      ctx.arc(584, 60, 28, 0, 7);
       ctx.fill();
       ctx.fillStyle = "#fff";
-      for (let i = 0; i < 3; i++) ctx.fillRect(56, 48 + i * 10, 48, 4);
+      for (let i = 0; i < 3; i++) ctx.fillRect(560, 48 + i * 10, 48, 4);
 
       // Cotton-candy clouds, parallax 0.2
       ctx.fillStyle = pal[2];
@@ -581,47 +581,107 @@
       ctx.restore();
     }
 
+    // ---------------------------------------------------------------------
+    // Text: a 5x7 pixel font drawn with rects so it stays crisp after the
+    // downsample. Each glyph is 7 rows of 5 cells, "#" lit, rows joined by "|".
+    // ---------------------------------------------------------------------
+    const GLYPHS = {
+      A: ".###.|#...#|#...#|#####|#...#|#...#|#...#",
+      B: "####.|#...#|#...#|####.|#...#|#...#|####.",
+      C: ".####|#....|#....|#....|#....|#....|.####",
+      D: "####.|#...#|#...#|#...#|#...#|#...#|####.",
+      E: "#####|#....|#....|####.|#....|#....|#####",
+      F: "#####|#....|#....|####.|#....|#....|#....",
+      G: ".####|#....|#....|#.###|#...#|#...#|.####",
+      H: "#...#|#...#|#...#|#####|#...#|#...#|#...#",
+      I: "#####|..#..|..#..|..#..|..#..|..#..|#####",
+      J: "....#|....#|....#|....#|#...#|#...#|.###.",
+      K: "#...#|#..#.|#.#..|##...|#.#..|#..#.|#...#",
+      L: "#....|#....|#....|#....|#....|#....|#####",
+      M: "#...#|##.##|#.#.#|#.#.#|#...#|#...#|#...#",
+      N: "#...#|##..#|#.#.#|#..##|#...#|#...#|#...#",
+      O: ".###.|#...#|#...#|#...#|#...#|#...#|.###.",
+      P: "####.|#...#|#...#|####.|#....|#....|#....",
+      Q: ".###.|#...#|#...#|#...#|#.#.#|#..#.|.##.#",
+      R: "####.|#...#|#...#|####.|#.#..|#..#.|#...#",
+      S: ".####|#....|#....|.###.|....#|....#|####.",
+      T: "#####|..#..|..#..|..#..|..#..|..#..|..#..",
+      U: "#...#|#...#|#...#|#...#|#...#|#...#|.###.",
+      V: "#...#|#...#|#...#|#...#|.#.#.|.#.#.|..#..",
+      W: "#...#|#...#|#...#|#.#.#|#.#.#|##.##|#...#",
+      X: "#...#|#...#|.#.#.|..#..|.#.#.|#...#|#...#",
+      Y: "#...#|#...#|.#.#.|..#..|..#..|..#..|..#..",
+      Z: "#####|....#|...#.|..#..|.#...|#....|#####",
+      0: ".###.|#...#|#..##|#.#.#|##..#|#...#|.###.",
+      1: "..#..|.##..|..#..|..#..|..#..|..#..|.###.",
+      2: ".###.|#...#|....#|...#.|..#..|.#...|#####",
+      3: "#####|...#.|..#..|...#.|....#|#...#|.###.",
+      4: "...#.|..##.|.#.#.|#..#.|#####|...#.|...#.",
+      5: "#####|#....|####.|....#|....#|#...#|.###.",
+      6: "..###|.#...|#....|####.|#...#|#...#|.###.",
+      7: "#####|....#|...#.|..#..|.#...|.#...|.#...",
+      8: ".###.|#...#|#...#|.###.|#...#|#...#|.###.",
+      9: ".###.|#...#|#...#|.####|....#|...#.|###..",
+      "+": ".....|..#..|..#..|#####|..#..|..#..|.....",
+      "-": ".....|.....|.....|#####|.....|.....|.....",
+      "!": "..#..|..#..|..#..|..#..|..#..|.....|..#..",
+      ".": ".....|.....|.....|.....|.....|.....|..#..",
+      ":": ".....|..#..|..#..|.....|..#..|..#..|.....",
+    };
+
+    // Draw `text` with its top edge at y. `scale` is the cell size in screen
+    // pixels. `align` is 0 left, 0.5 centered, 1 right. `color` may be a
+    // function of the character index for per-letter colors.
+    function drawText(text, x, y, scale, color, align = 0.5) {
+      const cell = 2 * scale;
+      text = String(text);
+      let cx = Math.round((x - (text.length * 6 - 1) * cell * align) / 2) * 2;
+      y = Math.round(y / 2) * 2;
+      [...text].forEach((ch, i) => {
+        ctx.fillStyle = typeof color === "function" ? color(i) : color;
+        (GLYPHS[ch] || "").split("|").forEach((row, ry) => {
+          [...row].forEach((c, rx) => c === "#" && ctx.fillRect(cx + rx * cell, y + ry * cell, cell, cell));
+        });
+        cx += 6 * cell;
+      });
+    }
+
     const rainbowFlicker = () => RAINBOW[(time * 15 | 0) % 6];
 
     function drawPopups() {
-      ctx.save();
-      ctx.font = "bold 22px sans-serif";
-      ctx.textAlign = "center";
       for (const p of popups) {
-        ctx.fillStyle = p.rainbow ? rainbowFlicker() : ROPE_RED;
         ctx.globalAlpha = Math.min(1, p.life * 2);
-        ctx.fillText(p.text, p.x, p.y);
+        drawText(p.text, p.x, p.y, 2, p.rainbow ? rainbowFlicker() : ROPE_RED);
       }
-      ctx.restore();
+      ctx.globalAlpha = 1;
     }
 
     function drawHud(pal) {
-      ctx.fillStyle = pal[4];
-      ctx.textAlign = "center";
+      const ink = pal[4];
       if (!score && state < SWINGING) {
-        ctx.font = "100 70px sans-serif";
-        ctx.fillText("SWING", WORLD_W / 2, 90);
-        ctx.font = "16px sans-serif";
-        ctx.fillText("HOLD TO PULL - RELEASE TO SWING", WORLD_W / 2, 118);
-        if (best) ctx.fillText("BEST " + best, WORLD_W / 2, 142);
-        ctx.font = "12px sans-serif";
-        ctx.fillText(muted ? "M - UNMUTE" : "M - MUTE", WORLD_W / 2, 162);
-      } else {
-        ctx.font = "100 " + (70 + 30 * scorePop | 0) + "px sans-serif";   // punches up on each point
-        ctx.fillText(score, WORLD_W / 2, 85);
+        // Title screen: extruded rainbow logo, pulsing prompt, corner hints.
+        drawText("SWINICORN", WORLD_W / 2 + 4, 56, 4, ink);
+        drawText("SWINICORN", WORLD_W / 2, 52, 4, i => RAINBOW[i % 6]);
+        ctx.globalAlpha = 0.7 + 0.3 * Math.sin(time * 5);
+        drawText("HOLD TO PULL - RELEASE TO SWING", WORLD_W / 2, 150, 1, ink);
+        ctx.globalAlpha = 0.6;
+        if (best) drawText("BEST " + best, 12, 12, 1, ink, 0);
+        drawText(muted ? "M: UNMUTE" : "M: MUTE", WORLD_W - 12, 12, 1, ink, 1);
+        ctx.globalAlpha = 1;
+      } else if (state !== GAME_OVER) {
+        const lift = Math.round(6 * scorePop) * 2;    // bounces up on each point
+        drawText(score, WORLD_W / 2, 26 - lift, 4, ink);
       }
 
       if (state === GAME_OVER) {
-        ctx.fillStyle = "#0004";
+        ctx.fillStyle = "#0005";
         ctx.fillRect(0, 0, WORLD_W, WORLD_H);
-        ctx.fillStyle = "#fff";
-        ctx.font = "100 70px sans-serif";
-        ctx.fillText(score, WORLD_W / 2, 165);
-        ctx.font = "18px sans-serif";
-        if (newBest) ctx.fillStyle = rainbowFlicker();
-        ctx.fillText(newBest ? "NEW BEST!" : "BEST " + best, WORLD_W / 2, 200);
-        ctx.fillStyle = "#fff";
-        ctx.fillText("CLICK OR SPACE TO RETRY", WORLD_W / 2, 235);
+        drawText("GAME OVER", WORLD_W / 2, 50, 2, "#fff");
+        drawText(score, WORLD_W / 2, 84, 5, "#fff");
+        drawText(newBest ? "NEW BEST!" : "BEST " + best, WORLD_W / 2, 176, 2, newBest ? rainbowFlicker() : "#fff");
+        ctx.globalAlpha = 0.7 + 0.3 * Math.sin(time * 5);
+        drawText("CLICK OR SPACE TO RETRY", WORLD_W / 2, 214, 1, "#fff");
+        ctx.globalAlpha = 1;
       }
     }
 
