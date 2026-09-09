@@ -1,0 +1,805 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Swing</title>
+  <style>
+    body {
+      margin: 0;
+      background: #222;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+    }
+    canvas {
+      height: min(100vh, 56.25vw);
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="screen" width="320" height="180"></canvas>
+  <script>
+    // ---------------------------------------------------------------------
+    // Swing — a unicorn swings on a candy-cane rope between layer-cake towers.
+    // Hold to walk back and stretch the rope, release to swing. Land on the
+    // next tower; hit its center for a PERFECT.
+    // ---------------------------------------------------------------------
+
+    // The world is drawn at 640x360 into an offscreen buffer, then copied to a
+    // 320x180 canvas with smoothing off so every pixel is crisp and chunky.
+    const WORLD_W = 640;
+    const WORLD_H = 360;
+    const SCREEN_W = 320;
+    const SCREEN_H = 180;
+
+    // Screen position the current tower settles at after every camera pan.
+    const TOP_SCREEN_Y = 200;      // y of the current tower's top surface
+    const ANCHOR_SCREEN_X = 96;    // x of the rope anchor (tower's front corner)
+
+    // Pull-back
+    const PULL_SPEED = 330;        // px/s the unicorn walks backward
+    const MAX_PULL = 800;
+    const STAND_OFFSET = 16;       // feet sit this far behind the anchor when idle
+
+    // Swing geometry, measured from the original game. All relative to pull.
+    const LANDING_RATIO = 0.55;    // landing distance past the anchor
+    const APEX_X_RATIO = 0.492;    // apex is this far past the anchor...
+    const APEX_Y_RATIO = 0.572;    // ...and this fraction of the dip above the top
+    const DIP_RATIO = 0.4;         // lowest point below the tower top
+    const MAX_DIP = 130;
+    const SWEEP = 3.75;            // radians swept around the anchor (~215 degrees)
+    const DROP_TIME = 0.25;        // seconds from apex to landing
+
+    // Landing rules
+    const FOOT = 4;                // tolerance from the tower edges
+    const PERFECT_WINDOW = 8;      // distance from the tower center for a PERFECT
+
+    // After landing
+    const LANDED_PAUSE = 0.6;      // seconds the camera holds still
+    const MERGE_SPEED = 400;       // px/s the landed tower grows left to meet the last one
+    const TOWER_RISE_SPEED = 1.7;  // new towers bounce up into place over ~0.6 s
+
+    const STEP_LENGTH = 20;        // walk cycle: one hoof step every STEP_LENGTH * PI px
+
+    // Juice
+    const SHAKE_DECAY = 20;        // screen-shake pixels lost per second
+    const TRAIL_LENGTH = 24;       // points in the rainbow ribbon behind the swinging unicorn
+    const HIT_STOP = 0.06;         // seconds the game freezes on a PERFECT
+
+    // Music: four bars of eighth notes. Letters are semitones above the base
+    // pitch (a = 0, b = 1, ...) and "." is a rest.
+    const BPM = 150;
+    const MELODY = "aehejhecaehmljh.cfjfljfecehmm.h.";
+    const BASS = "dkdkdkdkahahahahipipipipkrkrkrkr";
+
+    const GRAVITY = 1800;
+    const FAR_LEFT = -1e4;         // "infinitely" far left for extended towers
+
+    // Colors
+    const RAINBOW = ["#ff3b5c", "#ff9f1c", "#ffe14d", "#3ddc84", "#3aa0ff", "#a05cff"];
+    const UNICORN = { body: "#ffc6e0", hoof: "#c9a0e0", horn: "#ffd54a", eye: "#5a3a4a" };
+    const ROPE_RED = "#ff3b5c";
+    // Palettes cycle every 10 points: [sky, lollipop, clouds, hills, text]
+    const PALETTES = [
+      ["#fff3c4", "#ff8fb1", "#ffd1e8", "#b8f0d8", "#7a4a5a"],
+      ["#e0f7ff", "#ffb347", "#fff0c2", "#c8b7ff", "#4a5a7a"],
+      ["#f3e0ff", "#ff6f91", "#ffe0f0", "#b0e8a0", "#6a3a7a"],
+    ];
+
+    // Game states
+    const IDLE = 0;
+    const PULLING = 1;
+    const SWINGING = 2;
+    const PANNING = 3;
+    const FALLING = 4;
+    const GAME_OVER = 5;
+    const LANDED = 6;
+
+    // ---------------------------------------------------------------------
+    // Canvas setup
+    // ---------------------------------------------------------------------
+    const screen = document.getElementById("screen").getContext("2d");
+    screen.imageSmoothingEnabled = false;
+    const buffer = document.createElement("canvas");
+    buffer.width = WORLD_W;
+    buffer.height = WORLD_H;
+    const ctx = buffer.getContext("2d");
+
+    // ---------------------------------------------------------------------
+    // Game state
+    // ---------------------------------------------------------------------
+    let towers;          // [current, next]; each {left, width, top, rise}
+    let prevTower;       // the tower we came from, kept while the current one merges into it
+    let score;
+    let best = +localStorage.b || 0;
+    let state;
+    let holding = false; // button held; lets a hold carry through the pan into the next pull
+    let pull;            // how far the rope has been stretched
+    let timer;           // time inside the current state
+    let player;          // {x, y, tilt}; feet position in world units
+    let cam;             // {x, y, targetX, targetY}; world offset of the top-left of the screen
+    let walkTargetX;     // where the unicorn walks to during the pan
+    let anchor;          // {x, y}; the rope's fixed end at a tower's front corner
+    let flight;          // {apexX, apexY, landX, sweepTime} for the current swing
+    let ropeDrop;        // {angle, length}; the rope letting go after a landing
+    let ropeEnd;         // {x, y}; loose rope end during the landed pause
+    let fall;            // {vx, vy}
+    let popups;          // [{text, x, y, life}]
+    let lastStep;        // hoof step counter, for clop sounds while walking back
+    let particles;       // [{x, y, vx, vy, life, color, size, gravity}]
+    let trail;           // recent tail positions, drawn as a rainbow ribbon while airborne
+    let combo;           // consecutive PERFECT landings
+    let newBest;         // this run beat the saved best
+    let shake = 0;       // screen-shake amplitude in screen pixels
+    let flash = 0;       // white flash alpha
+    let squash = 0;      // landing squash, 1 = fully squashed
+    let scorePop = 0;    // HUD score bounce
+    let freeze = 0;      // hit-stop seconds remaining
+    let time = 0;        // total seconds, for idle animation and color cycling
+
+    const current = () => towers[0];
+    const anchorX = () => towers[0].left + towers[0].width;
+
+    function spawnTower() {
+      const difficulty = Math.min(score / 40, 1);
+      const last = towers[towers.length - 1];
+      // Widths run 44-120 px early and 24-60 px at full difficulty.
+      const width = 24 + (1 - difficulty) * 20 + Math.random() * (76 - difficulty * 40) | 0;
+      // Gaps run 70-180 px early and 200-410 px at full difficulty.
+      const gap = Math.min(
+        70 + difficulty * 130 + Math.random() * (110 + difficulty * 100),
+        440 - width / 2,   // must be reachable at max pull
+        520 - width        // must fit on screen right of the anchor
+      ) | 0;
+      towers.push({
+        left: last.left + last.width + gap,
+        width,
+        top: last.top + 20 + Math.random() * 40 | 0,  // every tower is lower than the last
+        rise: 0,                                       // 0 = still below the screen, 1 = in place
+      });
+    }
+
+    function reset() {
+      towers = [{ left: FAR_LEFT, width: ANCHOR_SCREEN_X - FAR_LEFT, top: TOP_SCREEN_Y, rise: 1 }];
+      prevTower = { left: FAR_LEFT, width: 0, top: TOP_SCREEN_Y, rise: 1 };
+      score = 0;
+      pull = 0;
+      timer = 0;
+      state = IDLE;
+      cam = { x: 0, y: 0, targetX: 0, targetY: 0 };
+      player = { x: ANCHOR_SCREEN_X - STAND_OFFSET, y: TOP_SCREEN_Y, tilt: 0 };
+      anchor = { x: ANCHOR_SCREEN_X, y: TOP_SCREEN_Y };
+      popups = [];
+      particles = [];
+      trail = [];
+      combo = 0;
+      newBest = false;
+      spawnTower();
+    }
+
+    function startPull() {
+      state = PULLING;
+      pull = 0;
+      lastStep = 0;
+    }
+
+    function release() {
+      const ax = anchorX();
+      const dip = Math.min(DIP_RATIO * pull, MAX_DIP);
+      flight = {
+        apexX: ax + APEX_X_RATIO * pull,
+        apexY: current().top - APEX_Y_RATIO * dip,
+        landX: ax + LANDING_RATIO * pull,
+        sweepTime: 0.45 + pull / 2000,
+      };
+      timer = 0;
+      state = SWINGING;
+      burst(player.x, player.y, 6, 90, { color: "#fff", lift: 80, life: 0.3, gravity: 0 });
+      sfx.whoosh();
+    }
+
+    // A point on the unicorn (local coords, feet at the origin, facing right)
+    // in world space, following the tilt.
+    function bodyPoint(lx, ly) {
+      const { x, y, tilt } = player;
+      return {
+        x: x + lx * Math.cos(tilt) - ly * Math.sin(tilt),
+        y: y + lx * Math.sin(tilt) + ly * Math.cos(tilt),
+      };
+    }
+    const handPosition = () => bodyPoint(14, -56);   // the rope ties on at the neck
+    const tailPosition = () => bodyPoint(-24, -30);
+
+    // Spray `count` square particles from (x, y) in all directions.
+    // `lift` adds upward speed; gravity 0 makes a drifting puff.
+    function burst(x, y, count, speed, { color, lift = 0, life = 0.6, size = 4, gravity = 600 } = {}) {
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * 7;
+        const s = speed * (0.3 + Math.random() * 0.7);
+        particles.push({
+          x, y,
+          vx: Math.cos(angle) * s,
+          vy: Math.sin(angle) * s - lift,
+          life, size, gravity,
+          color: color || RAINBOW[i % 6],
+        });
+      }
+    }
+
+    function land() {
+      const target = towers[1];
+      const x = flight.landX;
+      player.x = x;
+      player.y = target.top;
+      player.tilt = 0;
+
+      if (x > target.left + FOOT && x < target.left + target.width - FOOT) {
+        const perfect = Math.abs(x - target.left - target.width / 2) < PERFECT_WINDOW;
+        combo = perfect ? combo + 1 : 0;
+        score += perfect ? 2 : 1;
+        scorePop = 1;
+        squash = 1;
+        popups.push({
+          text: perfect ? (combo > 1 ? "x" + combo + " PERFECT" : "+2 PERFECT") : "+1",
+          x, y: player.y - 90, life: 0.8, rainbow: perfect,
+        });
+        // Landing dust; a PERFECT adds a rainbow burst, flash, shake and hit-stop.
+        burst(x, player.y, 8, 120, { color: "#fff", lift: 60, life: 0.35, gravity: 0 });
+        if (perfect) {
+          burst(x, player.y - 30, 24, 260, { lift: 150, life: 0.9, size: 5 });
+          flash = 0.5;
+          shake = 4;
+          freeze = HIT_STOP;
+        } else {
+          shake = 2;
+        }
+        // The rope lets go of the unicorn and hangs from the old anchor.
+        const hand = handPosition();
+        ropeDrop = {
+          angle: Math.atan2(hand.y - anchor.y, hand.x - anchor.x),
+          length: Math.hypot(hand.x - anchor.x, hand.y - anchor.y),
+        };
+        ropeEnd = hand;
+        timer = 0;
+        state = LANDED;
+        if (perfect) sfx.perfect(combo); else sfx.land();
+      } else {
+        combo = 0;
+        state = FALLING;
+        fall = { vx: 40, vy: -100 };
+        if (x < target.left) {          // undershoot: bump the tower's face
+          player.x = target.left - 10;
+          fall.vx = -40;
+          burst(target.left, player.y - 40, 12, 160, { lift: 80, size: 3 });  // cake crumbs
+          shake = 6;
+          sfx.bump();
+        }
+        sfx.fall();
+      }
+    }
+
+    function gameOver() {
+      state = GAME_OVER;
+      newBest = score > best;
+      best = Math.max(best, score);
+      localStorage.b = best;
+      shake = 5;
+      if (newBest) burst(cam.x + WORLD_W / 2, cam.y + 120, 40, 300, { lift: 200, life: 1.5, size: 5 });  // confetti
+      sfx.gameOver();
+    }
+
+    // ---------------------------------------------------------------------
+    // Update
+    // ---------------------------------------------------------------------
+    function update(dt) {
+      time += dt;
+      if (freeze > 0) {          // hit-stop: everything holds still for a moment
+        freeze -= dt;
+        return;
+      }
+      shake = Math.max(0, shake - SHAKE_DECAY * dt);
+      flash = Math.max(0, flash - 3 * dt);
+      squash = Math.max(0, squash - 4 * dt);
+      scorePop = Math.max(0, scorePop - 4 * dt);
+
+      const cur = current();
+      const ax = anchorX();
+
+      // New towers bounce up into place; the current tower grows leftward
+      // until it merges with the previous one, whose top sinks to match.
+      for (const t of towers) t.rise = Math.min(1, t.rise + dt * TOWER_RISE_SPEED);
+      cur.left = Math.max(cur.left - MERGE_SPEED * dt, prevTower.left + prevTower.width);
+      cur.width = ax - cur.left;
+      prevTower.top += (cur.top - prevTower.top) * Math.min(1, dt * 4);
+
+      switch (state) {
+        case PULLING: {
+          pull = Math.min(pull + PULL_SPEED * dt, MAX_PULL);
+          player.x = ax - STAND_OFFSET - pull;
+          player.tilt = -0.3 - 0.3 * pull / MAX_PULL;
+          cam.x = Math.min(cam.x, player.x - 80);   // camera follows the walk back
+          const step = Math.floor(pull / STEP_LENGTH / Math.PI);
+          if (step !== lastStep) {                  // a hoof hits the ground
+            lastStep = step;
+            burst(player.x + 4, player.y, 3, 60, { lift: 120, life: 0.5, size: 3 });  // kicked-up sprinkles
+            sfx.clop();
+          }
+          break;
+        }
+
+        case SWINGING: {
+          timer += dt;
+          if (timer < flight.sweepTime) {
+            // Sweep around the anchor: down in front of the tower, under the
+            // anchor, up past horizontal to the apex. The horizontal radius
+            // shrinks through the sweep to squash the path like the original.
+            const u = timer / flight.sweepTime;
+            const angle = Math.PI + SWEEP * Math.sin(Math.PI * u / 2) ** 1.5;
+            const radius = pull * (1 - 0.4 * Math.min(1, (angle - Math.PI) / Math.PI));
+            player.x = ax + radius * Math.cos(angle);
+            player.y = cur.top - Math.min(DIP_RATIO * pull, MAX_DIP) * Math.sin(angle);
+            player.tilt = (angle - 1.5 * Math.PI) * 0.4;
+          } else {
+            // Drop from the apex onto the target tower.
+            const u = (timer - flight.sweepTime) / DROP_TIME;
+            if (u >= 1) {
+              land();
+            } else {
+              player.x = flight.apexX + (flight.landX - flight.apexX) * u;
+              player.y = flight.apexY + (towers[1].top - flight.apexY) * u * u;
+              player.tilt = 0.87 * (1 - u);
+            }
+          }
+          // Drift the camera so the anchor settles a quarter of the way in.
+          const camTarget = Math.min(player.x - 0.15 * WORLD_W, ax - 0.25 * WORLD_W);
+          cam.x += (camTarget - cam.x) * Math.min(1, 6 * dt);
+          break;
+        }
+
+        case LANDED: {
+          timer += dt;
+          // Rope swings down from the old anchor over the first half of the
+          // pause, then retracts over the rest of it.
+          let u = Math.min(1, timer / (0.5 * LANDED_PAUSE));
+          u = u * u * (3 - 2 * u);
+          const angle = ropeDrop.angle + (2.1 - ropeDrop.angle) * u;
+          const retract = Math.max(0, timer - 0.55 * LANDED_PAUSE) / (0.4 * LANDED_PAUSE);
+          const length = ropeDrop.length * (1 - Math.min(1, retract));
+          ropeEnd = { x: anchor.x + length * Math.cos(angle), y: anchor.y + length * Math.sin(angle) };
+
+          if (timer > LANDED_PAUSE) {
+            prevTower = towers.shift();
+            prevTower.width += prevTower.left - FAR_LEFT;
+            prevTower.left = FAR_LEFT;
+            spawnTower();
+            cam.targetX = anchorX() - ANCHOR_SCREEN_X;
+            cam.targetY = current().top - TOP_SCREEN_Y;
+            walkTargetX = anchorX() - STAND_OFFSET;
+            anchor = { x: anchorX(), y: current().top };
+            state = PANNING;
+          }
+          break;
+        }
+
+        case PANNING: {
+          const k = Math.min(1, dt * 6);
+          cam.x += (cam.targetX - cam.x) * k;
+          cam.y += (cam.targetY - cam.y) * k;
+          player.x += (walkTargetX - player.x) * k;
+          if (Math.abs(cam.targetX - cam.x) < 0.5) {
+            cam.x = cam.targetX;
+            cam.y = cam.targetY;
+            player.x = walkTargetX;
+            state = IDLE;
+            if (holding) startPull();
+          }
+          break;
+        }
+
+        case FALLING: {
+          fall.vy += GRAVITY * dt;
+          player.x += fall.vx * dt;
+          player.y += fall.vy * dt;
+          player.tilt += 5 * dt;
+          if (player.y > cam.y + WORLD_H + 80) gameOver();
+          break;
+        }
+      }
+
+      // The rainbow ribbon follows the tail while airborne and dissolves otherwise.
+      if (state === SWINGING || state === FALLING) trail.push(tailPosition()); else trail.shift();
+      if (trail.length > TRAIL_LENGTH) trail.shift();
+
+      popups = popups.filter(p => (p.y -= 60 * dt, (p.life -= dt) > 0));
+      particles = particles.filter(p => {
+        p.vy += p.gravity * dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        return (p.life -= dt) > 0;
+      });
+    }
+
+    // ---------------------------------------------------------------------
+    // Drawing
+    // ---------------------------------------------------------------------
+    function drawBackground(pal) {
+      ctx.fillStyle = pal[0];
+      ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+
+      // Sprinkles in the sky
+      ctx.globalAlpha = 0.5;
+      for (let i = 0; i < 30; i++) {
+        ctx.fillStyle = RAINBOW[i % 6];
+        ctx.fillRect((i * 131) % WORLD_W, (i * 71) % 170, 4, 4);
+      }
+      ctx.globalAlpha = 1;
+
+      // Lollipop sun
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(78, 70, 6, 60);
+      ctx.fillStyle = pal[1];
+      ctx.beginPath();
+      ctx.arc(80, 60, 28, 0, 7);
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+      for (let i = 0; i < 3; i++) ctx.fillRect(56, 48 + i * 10, 48, 4);
+
+      // Cotton-candy clouds, parallax 0.2
+      ctx.fillStyle = pal[2];
+      for (let i = 0; i < 4; i++) {
+        const x = ((i * 320 - cam.x * 0.2) % 1160 + 1160) % 1160 - 100;
+        ctx.fillRect(x, 44 + i * 30, 120, 14);
+        ctx.fillRect(x + 20, 30 + i * 30, 60, 14);
+      }
+
+      // Mint hills, parallax 0.3
+      ctx.fillStyle = pal[3];
+      for (let i = 0; i < 5; i++) {
+        const x = ((i * 400 - cam.x * 0.3) % 1200 + 1200) % 1200 - 300;
+        ctx.beginPath();
+        ctx.arc(x + 200, WORLD_H + 140 - cam.y * 0.3, 260, 0, 7);
+        ctx.fill();
+      }
+    }
+
+    // A rainbow layer cake with white frosting and drips.
+    function drawTower(t) {
+      const back = t.rise - 1;
+      const top = t.top - (2.7 * back ** 3 + 1.7 * back * back) * 400;  // ease-out-back rise
+      const right = t.left + t.width;
+      const left = Math.max(t.left, cam.x - 9);   // extended towers start just off screen
+      const width = right - left;
+      if (right <= cam.x || left >= cam.x + WORLD_W) return;
+
+      for (let y = top + 14; y < cam.y + WORLD_H + 12; y += 12) {
+        ctx.fillStyle = RAINBOW[(y / 12 | 0) % 6];
+        ctx.fillRect(left, y, width, 12);
+      }
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(left, top, width, 14);
+      for (let d = 4; d < width - 6; d += 14) ctx.fillRect(left + d, top + 14, 6, 6 + d * 7 % 12);
+    }
+
+    function drawParticles() {
+      for (const p of particles) {
+        ctx.globalAlpha = Math.min(1, p.life * 3);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Six colored stripes along the recent tail positions.
+    function drawTrail() {
+      if (trail.length < 2) return;
+      ctx.lineWidth = 3;
+      ctx.globalAlpha = 0.8;
+      RAINBOW.forEach((color, i) => {
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        trail.forEach((p, j) => ctx[j ? "lineTo" : "moveTo"](p.x, p.y + i * 3 - 8));
+        ctx.stroke();
+      });
+      ctx.globalAlpha = 1;
+    }
+
+    // Candy-cane rope: a white stroke with a red dashed stroke on top.
+    function drawRope() {
+      const hand = handPosition();
+      const end = state === LANDED ? ropeEnd : hand;
+      const taut = state === SWINGING || state === PANNING || state === FALLING || state === LANDED;
+      const dist = Math.hypot(hand.x - anchor.x, hand.y - anchor.y);
+      const sagY = taut
+        ? (anchor.y + end.y) / 2 + Math.max(0, pull - dist) * 0.15 + 4
+        : anchor.y + 2;   // lying along the tower top
+
+      ctx.beginPath();
+      ctx.moveTo(anchor.x, anchor.y + 3);
+      ctx.quadraticCurveTo((anchor.x + end.x) / 2, sagY, end.x, end.y);
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = "#fff";
+      ctx.stroke();
+      ctx.setLineDash([8, 8]);
+      ctx.strokeStyle = ROPE_RED;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Pixel unicorn, feet at the origin, facing right.
+    function drawUnicorn() {
+      ctx.save();
+      ctx.translate(player.x, player.y);
+      ctx.rotate(player.tilt);
+      // Landing squash: wider and shorter, springing back.
+      const s = squash * squash;
+      ctx.scale(1 + 0.35 * s, 1 - 0.35 * s);
+
+      // Walk cycle while pulling back: alternate leg pairs swing and lift,
+      // and the body bobs twice per cycle. Driven by distance, not time,
+      // so the steps match the walking speed.
+      const walking = state === PULLING;
+      const phase = walking ? pull / STEP_LENGTH : 0;
+      const swing = Math.sin(phase) * 5;
+      const bob = walking ? Math.abs(Math.cos(phase)) * 2      // steps
+        : state === IDLE ? 1 + Math.sin(time * 6) : 0;         // breathing
+      const legs = [-20, -9, 4, 14];
+      legs.forEach((lx, i) => {
+        const dir = i % 2 ? 1 : -1;                       // pairs move opposite ways
+        const lift = Math.max(0, dir * Math.sin(phase)) * 3;
+        ctx.fillStyle = UNICORN.body;
+        ctx.fillRect(lx + dir * swing, -16 - lift, 8, 16);
+        ctx.fillStyle = UNICORN.hoof;
+        ctx.fillRect(lx + dir * swing, -4 - lift, 8, 4);
+      });
+
+      ctx.translate(0, -bob);
+      ctx.fillStyle = UNICORN.body;
+      ctx.fillRect(-22, -40, 44, 26);                     // body
+      ctx.fillRect(6, -62, 16, 24);                       // neck
+      ctx.fillRect(10, -70, 28, 18);                      // head
+
+      ctx.fillStyle = UNICORN.horn;
+      ctx.beginPath();
+      ctx.moveTo(20, -70);
+      ctx.lineTo(30, -70);
+      ctx.lineTo(25, -92);
+      ctx.fill();
+
+      ctx.fillStyle = UNICORN.eye;
+      ctx.fillRect(29, -65, 4, 4);
+
+      // Rainbow mane down the neck and tail off the back
+      RAINBOW.forEach((color, i) => {
+        ctx.fillStyle = color;
+        ctx.fillRect(2, -70 + i * 5, 6, 5);
+        ctx.fillRect(-30 + i * 2, -42 + i * 4, 8, 5);
+      });
+
+      ctx.restore();
+    }
+
+    const rainbowFlicker = () => RAINBOW[(time * 15 | 0) % 6];
+
+    function drawPopups() {
+      ctx.save();
+      ctx.font = "bold 22px sans-serif";
+      ctx.textAlign = "center";
+      for (const p of popups) {
+        ctx.fillStyle = p.rainbow ? rainbowFlicker() : ROPE_RED;
+        ctx.globalAlpha = Math.min(1, p.life * 2);
+        ctx.fillText(p.text, p.x, p.y);
+      }
+      ctx.restore();
+    }
+
+    function drawHud(pal) {
+      ctx.fillStyle = pal[4];
+      ctx.textAlign = "center";
+      if (!score && state < SWINGING) {
+        ctx.font = "100 70px sans-serif";
+        ctx.fillText("SWING", WORLD_W / 2, 90);
+        ctx.font = "16px sans-serif";
+        ctx.fillText("HOLD TO PULL - RELEASE TO SWING", WORLD_W / 2, 118);
+        if (best) ctx.fillText("BEST " + best, WORLD_W / 2, 142);
+        ctx.font = "12px sans-serif";
+        ctx.fillText(muted ? "M - UNMUTE" : "M - MUTE", WORLD_W / 2, 162);
+      } else {
+        ctx.font = "100 " + (70 + 30 * scorePop | 0) + "px sans-serif";   // punches up on each point
+        ctx.fillText(score, WORLD_W / 2, 85);
+      }
+
+      if (state === GAME_OVER) {
+        ctx.fillStyle = "#0004";
+        ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+        ctx.fillStyle = "#fff";
+        ctx.font = "100 70px sans-serif";
+        ctx.fillText(score, WORLD_W / 2, 165);
+        ctx.font = "18px sans-serif";
+        if (newBest) ctx.fillStyle = rainbowFlicker();
+        ctx.fillText(newBest ? "NEW BEST!" : "BEST " + best, WORLD_W / 2, 200);
+        ctx.fillStyle = "#fff";
+        ctx.fillText("CLICK OR SPACE TO RETRY", WORLD_W / 2, 235);
+      }
+    }
+
+    function draw() {
+      const pal = PALETTES[(score / 10 | 0) % PALETTES.length];
+      drawBackground(pal);
+
+      ctx.save();
+      ctx.translate(-cam.x, -cam.y);
+      drawTower(prevTower);
+      for (const t of towers) drawTower(t);
+      drawTrail();
+      drawRope();
+      drawUnicorn();
+      drawParticles();
+      drawPopups();
+      ctx.restore();
+
+      drawHud(pal);
+      if (flash) {
+        ctx.globalAlpha = flash;
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+        ctx.globalAlpha = 1;
+      }
+
+      // Screen shake: blit the buffer at a random whole-pixel offset.
+      screen.fillStyle = pal[0];
+      screen.fillRect(0, 0, SCREEN_W, SCREEN_H);
+      const jitter = () => Math.round((Math.random() - 0.5) * shake);
+      screen.drawImage(buffer, jitter(), jitter(), SCREEN_W, SCREEN_H);
+    }
+
+    // ---------------------------------------------------------------------
+    // Sound: a tiny Web Audio synth, no files. The context is created on
+    // the first input because browsers block audio before a user gesture.
+    // ---------------------------------------------------------------------
+    let audio;
+    let master;          // master gain; muting sets it to 0
+    let noiseBuffer;
+    let muted = !!+localStorage.m;
+
+    function initAudio() {
+      if (audio) return;
+      audio = new AudioContext();
+      master = audio.createGain();
+      master.gain.value = muted ? 0 : 1;
+      master.connect(audio.destination);
+      noiseBuffer = audio.createBuffer(1, audio.sampleRate, audio.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      musicTime = audio.currentTime + 0.1;
+    }
+
+    function toggleMute() {
+      muted = !muted;
+      localStorage.m = +muted;
+      if (master) master.gain.value = muted ? 0 : 1;
+    }
+
+    // One oscillator note sliding from `from` to `to` Hz, fading out over `duration`.
+    function tone(type, from, to, duration, volume = 0.15, delay = 0) {
+      if (!audio) return;
+      const t = audio.currentTime + delay;
+      const osc = audio.createOscillator();
+      const gain = audio.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(from, t);
+      osc.frequency.exponentialRampToValueAtTime(to, t + duration);
+      gain.gain.setValueAtTime(volume, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
+      osc.connect(gain).connect(master);
+      osc.start(t);
+      osc.stop(t + duration);
+    }
+
+    // White noise through a band-pass filter sweeping from `from` to `to` Hz.
+    function noise(duration, from, to, volume, delay = 0) {
+      if (!audio) return;
+      const t = audio.currentTime + delay;
+      const src = audio.createBufferSource();
+      src.buffer = noiseBuffer;
+      const filter = audio.createBiquadFilter();
+      filter.type = "bandpass";
+      filter.Q.value = 1;
+      filter.frequency.setValueAtTime(from, t);
+      filter.frequency.exponentialRampToValueAtTime(to, t + duration);
+      const gain = audio.createGain();
+      gain.gain.setValueAtTime(volume, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
+      src.connect(filter).connect(gain).connect(master);
+      src.start(t);
+      src.stop(t + duration);
+    }
+
+    const sfx = {
+      clop: () => tone("triangle", 220, 110, 0.06, 0.12),
+      whoosh: () => noise(0.35, 300, 2500, 0.25),
+      land: () => {
+        tone("triangle", 260, 130, 0.12, 0.2);
+        noise(0.08, 800, 300, 0.1);
+      },
+      perfect: combo => {
+        const k = 2 ** (Math.min(combo - 1, 7) / 12);   // each combo step raises the chime a semitone
+        [880, 1320, 1760].forEach((f, i) => tone("sine", f * k, f * k, 0.12 + i * 0.09, 0.15, i * 0.1));
+      },
+      bump: () => {
+        tone("square", 120, 50, 0.15, 0.15);
+        noise(0.1, 400, 150, 0.2);
+      },
+      fall: () => tone("sawtooth", 500, 100, 0.6, 0.08),
+      gameOver: () => [330, 262, 196].forEach((f, i) => tone("square", f, f * 0.98, 0.25, 0.1, i * 0.2)),
+    };
+
+    // ---------------------------------------------------------------------
+    // Music: a looping chiptune scheduled a little ahead of the audio clock.
+    // Square-wave melody, triangle bass, sine kick and noise hi-hat.
+    // ---------------------------------------------------------------------
+    const STEP_TIME = 30 / BPM;    // one eighth note
+    let musicTime = 0;             // audio clock time of the next step
+    let musicStep = 0;
+    const pitch = (letter, base) => base * 2 ** ((letter.charCodeAt() - 97) / 12);
+
+    function scheduleMusic() {
+      if (!audio) return;
+      if (state === GAME_OVER) {   // silence on the game-over screen
+        musicTime = audio.currentTime;
+        return;
+      }
+      while (musicTime < audio.currentTime + 0.2) {
+        const i = musicStep++ % MELODY.length;
+        const delay = musicTime - audio.currentTime;
+        const note = MELODY[i];
+        if (note !== ".") tone("square", pitch(note, 523), pitch(note, 523), STEP_TIME * 0.9, 0.04, delay);
+        tone("triangle", pitch(BASS[i], 110), pitch(BASS[i], 110), STEP_TIME * 0.8, 0.12, delay);
+        if (i % 4 === 0) tone("sine", 150, 40, 0.1, 0.3, delay);   // kick on the beat
+        noise(0.03, 7000, 7000, i % 2 ? 0.02 : 0.04, delay);       // hi-hat
+        musicTime += STEP_TIME;
+      }
+    }
+    setInterval(scheduleMusic, 100);
+
+    // ---------------------------------------------------------------------
+    // Input: mouse button or Space. Hold to pull, release to swing. M mutes.
+    // ---------------------------------------------------------------------
+    const isSpaceOrMouse = e => !e.key || e.key === " ";
+
+    function press(e) {
+      if (e.repeat || !isSpaceOrMouse(e)) return;
+      initAudio();
+      holding = true;
+      if (state === GAME_OVER) reset();
+      else if (state === IDLE) startPull();
+    }
+
+    onmousedown = press;
+    onkeydown = e => e.key === "m" || e.key === "M" ? toggleMute() : press(e);
+
+    onmouseup = onkeyup = e => {
+      if (!isSpaceOrMouse(e)) return;
+      holding = false;
+      if (state === PULLING) release();
+    };
+
+    // ---------------------------------------------------------------------
+    // Main loop
+    // ---------------------------------------------------------------------
+    let lastTime = 0;
+    function frame(now) {
+      const dt = Math.min((now - lastTime) / 1000, 0.05);
+      lastTime = now;
+      update(dt);
+      draw();
+      requestAnimationFrame(frame);
+    }
+
+    reset();
+    frame(0);
+  </script>
+</body>
+</html>

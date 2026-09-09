@@ -1,0 +1,11 @@
+{
+  "name": "swing-js13k",
+  "private": true,
+  "description": "Swing: a unicorn rope-swing game for js13kgames",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "terser": "^5.36.0"
+  }
+}
