@@ -37,7 +37,7 @@
 
     // Screen position the current tower settles at after every camera pan.
     const TOP_SCREEN_Y = 200;      // y of the current tower's top surface
-    const ANCHOR_SCREEN_X = 96;    // x of the rope anchor (tower's front corner)
+    const ANCHOR_SCREEN_X = 160;   // x of the rope anchor (tower's front corner)
 
     // Pull-back
     const PULL_SPEED = 330;        // px/s the unicorn walks backward
@@ -51,11 +51,21 @@
     const DIP_RATIO = 0.4;         // lowest point below the tower top
     const MAX_DIP = 130;
     const SWEEP = 3.75;            // radians swept around the anchor (~215 degrees)
+    const RADIUS_SHRINK = 0.4;     // the swing radius shrinks by this much through the sweep
     const DROP_TIME = 0.25;        // seconds from apex to landing
+
+    const MIN_WIDTH = 44;          // narrowest tower: the unicorn's four legs side by side
 
     // Landing rules
     const FOOT = 4;                // tolerance from the tower edges
     const PERFECT_WINDOW = 8;      // distance from the tower center for a PERFECT
+
+    // Rainbows float above some towers, on the path of a well-aimed swing.
+    const RAINBOW_CHANCE = 0.4;    // fraction of towers that get one
+    const RAINBOW_WINDOW = 20;     // landing this close to a rainbow's x collects it
+    const RAINBOW_SINK = 24;       // the arcs are drawn this far below the pickup point, so
+                                   // the front hooves (16 px below the feet at that tilt) pass through them
+    const RAINBOW_HOP = -350;      // upward speed of a rainbow knocked off by a landing
 
     // After landing
     const LANDED_PAUSE = 0.6;      // seconds the camera holds still
@@ -129,6 +139,9 @@
     let fall;            // {vx, vy}
     let popups;          // [{text, x, y, life}]
     let lastStep;        // hoof step counter, for clop sounds while walking back
+    let rainbows;        // [{x, y, vy, tower, falling}]; (x, y) is the pickup point
+    let collected = +localStorage.r || 0;   // rainbows collected, all time
+    let rainbowPop = 0;  // HUD counter bounce
     let particles;       // [{x, y, vx, vy, life, color, size, gravity}]
     let trail;           // recent tail positions, drawn as a rainbow ribbon while airborne
     let combo;           // consecutive PERFECT landings
@@ -146,20 +159,42 @@
     function spawnTower() {
       const difficulty = Math.min(score / 40, 1);
       const last = towers[towers.length - 1];
-      // Widths run 44-120 px early and 24-60 px at full difficulty.
-      const width = 24 + (1 - difficulty) * 20 + Math.random() * (76 - difficulty * 40) | 0;
-      // Gaps run 70-180 px early and 200-410 px at full difficulty.
+      // Widths run 44-120 px early and 44-84 px at full difficulty; the
+      // minimum is the span of the unicorn's four legs.
+      const width = MIN_WIDTH + Math.random() * (120 - MIN_WIDTH - difficulty * 36) | 0;
+      // Thin towers are hard to hit, so they start out close to the unicorn
+      // and drift farther as the score climbs. Wide towers can be far from
+      // the start. thinness: 0 = widest, 1 = thinnest.
+      const thinness = 1 - (width - MIN_WIDTH) / (120 - MIN_WIDTH);
+      const farthestWide = 180 + difficulty * 230;   // 180 px early, 410 px late
+      const farthestThin = 90 + difficulty * 320;    //  90 px early, 410 px late
+      const farthest = farthestWide + (farthestThin - farthestWide) * thinness;
+      const nearest = 70 + difficulty * 50;
       const gap = Math.min(
-        70 + difficulty * 130 + Math.random() * (110 + difficulty * 100),
-        440 - width / 2,   // must be reachable at max pull
-        520 - width        // must fit on screen right of the anchor
+        nearest + Math.random() * (farthest - nearest),
+        440 - width / 2,                        // must be reachable at max pull
+        WORLD_W - ANCHOR_SCREEN_X - 24 - width  // must fit on screen right of the anchor
       ) | 0;
-      towers.push({
+      const tower = {
         left: last.left + last.width + gap,
         width,
         top: last.top + 20 + Math.random() * 40 | 0,  // every tower is lower than the last
         rise: 0,                                       // 0 = still below the screen, 1 = in place
-      });
+      };
+      towers.push(tower);
+
+      // A rainbow floats centered over the tower, where a center-aimed swing
+      // passes on its way up to the apex. The arc is relative to the tower
+      // being swung from (`last`): past its top the radius is
+      // (1 - RADIUS_SHRINK) x pull, so the arc crosses the center line at
+      // cos(angle) = LANDING_RATIO / (1 - RADIUS_SHRINK), dip x sin(angle)
+      // above that top.
+      if (Math.random() < RAINBOW_CHANCE) {
+        const centerPull = (tower.left + width / 2 - anchorX()) / LANDING_RATIO;
+        const dip = Math.min(DIP_RATIO * centerPull, MAX_DIP);
+        const sinCross = Math.sqrt(1 - (LANDING_RATIO / (1 - RADIUS_SHRINK)) ** 2);
+        rainbows.push({ x: tower.left + width / 2, y: last.top - dip * sinCross, vy: 0, tower, falling: false });
+      }
     }
 
     function reset() {
@@ -173,6 +208,7 @@
       player = { x: ANCHOR_SCREEN_X - STAND_OFFSET, y: TOP_SCREEN_Y, tilt: 0 };
       anchor = { x: ANCHOR_SCREEN_X, y: TOP_SCREEN_Y };
       popups = [];
+      rainbows = [];
       particles = [];
       trail = [];
       combo = 0;
@@ -232,11 +268,29 @@
     function land() {
       const target = towers[1];
       const x = flight.landX;
+      const landed = x > target.left + FOOT && x < target.left + target.width - FOOT;
       player.x = x;
       player.y = target.top;
       player.tilt = 0;
 
-      if (x > target.left + FOOT && x < target.left + target.width - FOOT) {
+      // Landing under a rainbow collects it; otherwise it hops off the tower
+      // and falls away.
+      for (const r of rainbows) {
+        if (r.tower !== target || r.falling) continue;
+        if (landed && Math.abs(x - r.x) < RAINBOW_WINDOW) {
+          rainbows.splice(rainbows.indexOf(r), 1);
+          localStorage.r = ++collected;
+          rainbowPop = 1;
+          burst(r.x, r.y + RAINBOW_SINK, 18, 200, { lift: 100, life: 0.8 });
+          sfx.rainbow();
+        } else {
+          r.falling = true;
+          r.vy = RAINBOW_HOP;
+          sfx.boing();
+        }
+      }
+
+      if (landed) {
         const perfect = Math.abs(x - target.left - target.width / 2) < PERFECT_WINDOW;
         combo = perfect ? combo + 1 : 0;
         score += perfect ? 2 : 1;
@@ -304,6 +358,7 @@
       flash = Math.max(0, flash - 3 * dt);
       squash = Math.max(0, squash - 4 * dt);
       scorePop = Math.max(0, scorePop - 4 * dt);
+      rainbowPop = Math.max(0, rainbowPop - 4 * dt);
 
       const cur = current();
       const ax = anchorX();
@@ -338,7 +393,7 @@
             // shrinks through the sweep to squash the path like the original.
             const u = timer / flight.sweepTime;
             const angle = Math.PI + SWEEP * Math.sin(Math.PI * u / 2) ** 1.5;
-            const radius = pull * (1 - 0.4 * Math.min(1, (angle - Math.PI) / Math.PI));
+            const radius = pull * (1 - RADIUS_SHRINK * Math.min(1, (angle - Math.PI) / Math.PI));
             player.x = ax + radius * Math.cos(angle);
             player.y = cur.top - Math.min(DIP_RATIO * pull, MAX_DIP) * Math.sin(angle);
             player.tilt = (angle - 1.5 * Math.PI) * 0.4;
@@ -414,6 +469,13 @@
       if (trail.length > TRAIL_LENGTH) trail.shift();
 
       popups = popups.filter(p => (p.y -= 60 * dt, (p.life -= dt) > 0));
+      rainbows = rainbows.filter(r => {
+        if (r.falling) {
+          r.vy += GRAVITY * dt;
+          r.y += r.vy * dt;
+        }
+        return r.y < cam.y + WORLD_H + 40;
+      });
       particles = particles.filter(p => {
         p.vy += p.gravity * dt;
         p.x += p.vx * dt;
@@ -465,10 +527,15 @@
       }
     }
 
+    // Where a tower's top is drawn while it rises into place (ease-out-back).
+    function towerTop(t) {
+      const back = t.rise - 1;
+      return t.top - (2.7 * back ** 3 + 1.7 * back * back) * 400;
+    }
+
     // A rainbow layer cake with white frosting and drips.
     function drawTower(t) {
-      const back = t.rise - 1;
-      const top = t.top - (2.7 * back ** 3 + 1.7 * back * back) * 400;  // ease-out-back rise
+      const top = towerTop(t);
       const right = t.left + t.width;
       const left = Math.max(t.left, cam.x - 9);   // extended towers start just off screen
       const width = right - left;
@@ -481,6 +548,28 @@
       ctx.fillStyle = "#fff";
       ctx.fillRect(left, top, width, 14);
       for (let d = 4; d < width - 6; d += 14) ctx.fillRect(left + d, top + 14, 6, 6 + d * 7 % 12);
+    }
+
+    // Six arcs of `band` thickness with a cloud puff at each end; (x, y) is
+    // the center of the baseline.
+    function drawRainbowArcs(x, y, band) {
+      ctx.lineWidth = band;
+      RAINBOW.forEach((color, i) => {
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        ctx.arc(x, y, band * (6.5 - i), Math.PI, 2 * Math.PI);
+        ctx.stroke();
+      });
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(x - 7 * band, y - band, 5 * band, 2 * band);
+      ctx.fillRect(x + 2 * band, y - band, 5 * band, 2 * band);
+    }
+
+    function drawRainbows() {
+      for (const r of rainbows) {
+        const bob = r.falling ? 0 : Math.sin(time * 3) * 3;
+        drawRainbowArcs(r.x, r.y + RAINBOW_SINK + towerTop(r.tower) - r.tower.top + bob, 3);
+      }
     }
 
     function drawParticles() {
@@ -528,23 +617,12 @@
       ctx.setLineDash([]);
     }
 
-    // Pixel unicorn, feet at the origin, facing right.
-    function drawUnicorn() {
-      ctx.save();
-      ctx.translate(player.x, player.y);
-      ctx.rotate(player.tilt);
-      // Landing squash: wider and shorter, springing back.
-      const s = squash * squash;
-      ctx.scale(1 + 0.35 * s, 1 - 0.35 * s);
-
-      // Walk cycle while pulling back: alternate leg pairs swing and lift,
-      // and the body bobs twice per cycle. Driven by distance, not time,
-      // so the steps match the walking speed.
-      const walking = state === PULLING;
-      const phase = walking ? pull / STEP_LENGTH : 0;
+    // Pixel unicorn parts, feet at the origin, facing right. `phase` drives
+    // the walk cycle, `bob` lifts the body, `sad` gives a teary face.
+    function drawUnicornParts(phase, bob, sad) {
+      // Walk cycle: alternate leg pairs swing and lift. Driven by distance,
+      // not time, so the steps match the walking speed.
       const swing = Math.sin(phase) * 5;
-      const bob = walking ? Math.abs(Math.cos(phase)) * 2      // steps
-        : state === IDLE ? 1 + Math.sin(time * 6) : 0;         // breathing
       const legs = [-20, -9, 4, 14];
       legs.forEach((lx, i) => {
         const dir = i % 2 ? 1 : -1;                       // pairs move opposite ways
@@ -569,7 +647,17 @@
       ctx.fill();
 
       ctx.fillStyle = UNICORN.eye;
-      ctx.fillRect(29, -65, 4, 4);
+      if (sad) {
+        ctx.fillRect(28, -64, 6, 2);                      // half-closed eye
+        ctx.fillRect(26, -67, 3, 1);                      // brow, raised toward the nose
+        ctx.fillRect(29, -68, 4, 1);
+        ctx.fillRect(34, -55, 3, 1);                      // frown
+        ctx.fillStyle = "#7fd0ff";
+        ctx.fillRect(30, -61, 2, 5);                      // tear
+        ctx.fillRect(29, -57, 4, 3);
+      } else {
+        ctx.fillRect(29, -65, 4, 4);
+      }
 
       // Rainbow mane down the neck and tail off the back
       RAINBOW.forEach((color, i) => {
@@ -577,7 +665,31 @@
         ctx.fillRect(2, -70 + i * 5, 6, 5);
         ctx.fillRect(-30 + i * 2, -42 + i * 4, 8, 5);
       });
+    }
 
+    function drawUnicorn() {
+      ctx.save();
+      ctx.translate(player.x, player.y);
+      ctx.rotate(player.tilt);
+      // Landing squash: wider and shorter, springing back.
+      const s = squash * squash;
+      ctx.scale(1 + 0.35 * s, 1 - 0.35 * s);
+
+      const walking = state === PULLING;
+      const phase = walking ? pull / STEP_LENGTH : 0;
+      const bob = walking ? Math.abs(Math.cos(phase)) * 2      // steps
+        : state === IDLE ? 1 + Math.sin(time * 6) : 0;         // breathing
+      drawUnicornParts(phase, bob, false);
+      ctx.restore();
+    }
+
+    // Game over: a big, tilted, teary close-up in the bottom-left corner.
+    function drawSadUnicorn() {
+      ctx.save();
+      ctx.translate(-10, WORLD_H + 80);
+      ctx.rotate(0.35);
+      ctx.scale(2.6, 2.6);
+      drawUnicornParts(0, 0, true);
       ctx.restore();
     }
 
@@ -660,22 +772,36 @@
       const ink = pal[4];
       if (!score && state < SWINGING) {
         // Title screen: extruded rainbow logo, pulsing prompt, corner hints.
-        drawText("SWINICORN", WORLD_W / 2 + 4, 56, 4, ink);
-        drawText("SWINICORN", WORLD_W / 2, 52, 4, i => RAINBOW[i % 6]);
+        drawText("SWINICORN", WORLD_W / 2 + 4, 44, 4, ink);
+        drawText("SWINICORN", WORLD_W / 2, 40, 4, i => RAINBOW[i % 6]);
         ctx.globalAlpha = 0.7 + 0.3 * Math.sin(time * 5);
-        drawText("HOLD TO PULL - RELEASE TO SWING", WORLD_W / 2, 150, 1, ink);
+        // Prompt sits right of the unicorn, between the logo and the first rainbow.
+        drawText("HOLD TO PULL - RELEASE TO SWING", (WORLD_W + ANCHOR_SCREEN_X) / 2, 128, 1, ink);
         ctx.globalAlpha = 0.6;
-        if (best) drawText("BEST " + best, 12, 12, 1, ink, 0);
+        if (best) drawText("BEST " + best, 12, 30, 1, ink, 0);
         drawText(muted ? "M: UNMUTE" : "M: MUTE", WORLD_W - 12, 12, 1, ink, 1);
+        ctx.globalAlpha = 1;
+        // Credit on a sky-colored footer so it stays readable over any tower.
+        ctx.fillStyle = pal[0];
+        ctx.fillRect(0, WORLD_H - 26, WORLD_W, 26);
+        ctx.globalAlpha = 0.6;
+        drawText("A JS13K GAME BY KUSHAGRA GOUR", WORLD_W - 12, WORLD_H - 20, 1, ink, 1);
         ctx.globalAlpha = 1;
       } else if (state !== GAME_OVER) {
         const lift = Math.round(6 * scorePop) * 2;    // bounces up on each point
         drawText(score, WORLD_W / 2, 26 - lift, 4, ink);
       }
 
+      // Rainbow counter, top left. The icon hops when one is collected.
+      if (state !== GAME_OVER) {
+        drawRainbowArcs(24, 22 - Math.round(4 * rainbowPop) * 2, 2);
+        drawText(collected, 44, 12, 1, ink, 0);
+      }
+
       if (state === GAME_OVER) {
         ctx.fillStyle = "#0005";
         ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+        drawSadUnicorn();
         drawText("GAME OVER", WORLD_W / 2, 50, 2, "#fff");
         drawText(score, WORLD_W / 2, 84, 5, "#fff");
         drawText(newBest ? "NEW BEST!" : "BEST " + best, WORLD_W / 2, 176, 2, newBest ? rainbowFlicker() : "#fff");
@@ -693,6 +819,7 @@
       ctx.translate(-cam.x, -cam.y);
       drawTower(prevTower);
       for (const t of towers) drawTower(t);
+      drawRainbows();
       drawTrail();
       drawRope();
       drawUnicorn();
@@ -793,6 +920,8 @@
         noise(0.1, 400, 150, 0.2);
       },
       fall: () => tone("sawtooth", 500, 100, 0.6, 0.08),
+      rainbow: () => [523, 659, 784, 1047].forEach((f, i) => tone("square", f, f, 0.1, 0.08, i * 0.06)),
+      boing: () => tone("sine", 200, 700, 0.15, 0.15),
       gameOver: () => [330, 262, 196].forEach((f, i) => tone("square", f, f * 0.98, 0.25, 0.1, i * 0.2)),
     };
 
