@@ -49,7 +49,8 @@ async function build() {
   if (result.error) throw result.error;
 
   const html =
-    `<!doctype html><title>${title}</title><style>${minCss}</style>` +
+    `<!doctype html><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">` +
+    `<title>${title}</title><style>${minCss}</style>` +
     `${canvas}</canvas><script>${result.code}</script>`;
   fs.writeFileSync(OUT, html);
 

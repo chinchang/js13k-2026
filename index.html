@@ -2,20 +2,27 @@
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Swinicorn</title>
   <style>
-    body {
+    html, body {
       margin: 0;
+      height: 100%;
+      overflow: hidden;
+    }
+    body {
       background: #222;
-      height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
       user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
     }
     canvas {
       height: min(100vh, 56.25vw);
       image-rendering: pixelated;
+      touch-action: none;
     }
   </style>
 </head>
@@ -28,16 +35,19 @@
     // next tower; hit its center for a PERFECT.
     // ---------------------------------------------------------------------
 
-    // The world is drawn at 640x360 into an offscreen buffer, then copied to a
-    // 320x180 canvas with smoothing off so every pixel is crisp and chunky.
-    const WORLD_W = 640;
-    const WORLD_H = 360;
-    const SCREEN_W = 320;
-    const SCREEN_H = 180;
+    // The world is drawn into an offscreen buffer, then copied to a half-size
+    // canvas with smoothing off so every pixel is crisp and chunky. On a
+    // desktop (landscape) screen the world is a fixed 640x360; on a portrait
+    // screen (phones) it is 400 wide and as tall as the screen needs, so the
+    // game fills the display edge to edge. See layout().
+    let WORLD_W, WORLD_H, SCREEN_W, SCREEN_H;
+    let MOBILE;                    // portrait layout in use
 
-    // Screen position the current tower settles at after every camera pan.
-    const TOP_SCREEN_Y = 200;      // y of the current tower's top surface
-    const ANCHOR_SCREEN_X = 160;   // x of the rope anchor (tower's front corner)
+    // Screen position the current tower settles at after every camera pan:
+    // the anchor a quarter of the way in, the tower top 5/9 of the way down
+    // (200 of 360 on desktop).
+    let TOP_SCREEN_Y;              // y of the current tower's top surface
+    let ANCHOR_SCREEN_X;           // x of the rope anchor (tower's front corner)
 
     // Pull-back
     const PULL_SPEED = 330;        // px/s the unicorn walks backward
@@ -111,12 +121,40 @@
     // ---------------------------------------------------------------------
     // Canvas setup
     // ---------------------------------------------------------------------
-    const screen = document.getElementById("screen").getContext("2d");
-    screen.imageSmoothingEnabled = false;
+    const canvas = document.getElementById("screen");
+    const screen = canvas.getContext("2d");
     const buffer = document.createElement("canvas");
-    buffer.width = WORLD_W;
-    buffer.height = WORLD_H;
     const ctx = buffer.getContext("2d");
+
+    // Pick the world size for the current screen and size both canvases.
+    // Desktop keeps the fixed 640x360 world, letterboxed by the CSS. A
+    // portrait screen gets a 400-wide world with the screen's aspect ratio,
+    // stretched to fill the viewport exactly. Runs again on every resize
+    // (rotation, browser toolbar), re-seating the camera on the current tower.
+    function layout() {
+      MOBILE = innerHeight > innerWidth;
+      const w = MOBILE ? 400 : 640;
+      const h = MOBILE ? Math.round(w * innerHeight / innerWidth / 2) * 2 : 360;
+      canvas.style.width = MOBILE ? innerWidth + "px" : "";
+      canvas.style.height = MOBILE ? innerHeight + "px" : "";
+      if (w === WORLD_W && h === WORLD_H) return;   // desktop resizes change nothing
+      WORLD_W = w;
+      WORLD_H = h;
+      SCREEN_W = WORLD_W / 2;
+      SCREEN_H = WORLD_H / 2;
+      ANCHOR_SCREEN_X = WORLD_W / 4;
+      TOP_SCREEN_Y = WORLD_H * 5 / 9 | 0;
+      buffer.width = WORLD_W;
+      buffer.height = WORLD_H;
+      canvas.width = SCREEN_W;                 // resizing resets the context...
+      canvas.height = SCREEN_H;
+      screen.imageSmoothingEnabled = false;    // ...so smoothing is turned off again
+      if (towers) {
+        cam.x = cam.targetX = anchorX() - ANCHOR_SCREEN_X;
+        cam.y = cam.targetY = current().top - TOP_SCREEN_Y;
+      }
+    }
+    onresize = layout;
 
     // ---------------------------------------------------------------------
     // Game state
@@ -499,15 +537,17 @@
       }
       ctx.globalAlpha = 1;
 
-      // Lollipop sun, top right so it stays clear of the logo
+      // Lollipop sun, top right so it stays clear of the logo; on the narrow
+      // portrait screen it drops below the logo instead.
+      const sunY = MOBILE ? 150 : 60;
       ctx.fillStyle = "#fff";
-      ctx.fillRect(582, 70, 6, 60);
+      ctx.fillRect(WORLD_W - 58, sunY + 10, 6, 60);
       ctx.fillStyle = pal[1];
       ctx.beginPath();
-      ctx.arc(584, 60, 28, 0, 7);
+      ctx.arc(WORLD_W - 56, sunY, 28, 0, 7);
       ctx.fill();
       ctx.fillStyle = "#fff";
-      for (let i = 0; i < 3; i++) ctx.fillRect(560, 48 + i * 10, 48, 4);
+      for (let i = 0; i < 3; i++) ctx.fillRect(WORLD_W - 80, sunY - 12 + i * 10, 48, 4);
 
       // Cotton-candy clouds, parallax 0.2
       ctx.fillStyle = pal[2];
@@ -772,14 +812,19 @@
       const ink = pal[4];
       if (!score && state < SWINGING) {
         // Title screen: extruded rainbow logo, pulsing prompt, corner hints.
-        drawText("SWINICORN", WORLD_W / 2 + 4, 44, 4, ink);
-        drawText("SWINICORN", WORLD_W / 2, 40, 4, i => RAINBOW[i % 6]);
+        // The logo shrinks a step to fit the narrow portrait world.
+        const logo = MOBILE ? 3 : 4;
+        drawText("SWINICORN", WORLD_W / 2 + 4, 44, logo, ink);
+        drawText("SWINICORN", WORLD_W / 2, 40, logo, i => RAINBOW[i % 6]);
         ctx.globalAlpha = 0.7 + 0.3 * Math.sin(time * 5);
-        // Prompt sits right of the unicorn, between the logo and the first rainbow.
-        drawText("HOLD TO PULL - RELEASE TO SWING", (WORLD_W + ANCHOR_SCREEN_X) / 2, 128, 1, ink);
+        // Prompt sits right of the unicorn, between the logo and the first
+        // rainbow; on a portrait screen it is centered, halfway down to the tower.
+        if (MOBILE) drawText("HOLD TO PULL - RELEASE TO SWING", WORLD_W / 2, TOP_SCREEN_Y / 2, 1, ink);
+        else drawText("HOLD TO PULL - RELEASE TO SWING", (WORLD_W + ANCHOR_SCREEN_X) / 2, 128, 1, ink);
         ctx.globalAlpha = 0.6;
         if (best) drawText("BEST " + best, 12, 30, 1, ink, 0);
-        drawText(muted ? "M: UNMUTE" : "M: MUTE", WORLD_W - 12, 12, 1, ink, 1);
+        // Mute hint: the M key on desktop, a tap on the hint itself on mobile.
+        drawText((MOBILE ? "" : "M: ") + (muted ? "UNMUTE" : "MUTE"), WORLD_W - 12, 12, 1, ink, 1);
         ctx.globalAlpha = 1;
         // Credit on a sky-colored footer so it stays readable over any tower.
         ctx.fillStyle = pal[0];
@@ -802,11 +847,14 @@
         ctx.fillStyle = "#0005";
         ctx.fillRect(0, 0, WORLD_W, WORLD_H);
         drawSadUnicorn();
-        drawText("GAME OVER", WORLD_W / 2, 50, 2, "#fff");
-        drawText(score, WORLD_W / 2, 84, 5, "#fff");
-        drawText(newBest ? "NEW BEST!" : "BEST " + best, WORLD_W / 2, 176, 2, newBest ? rainbowFlicker() : "#fff");
+        // On a tall portrait screen the text block moves down to the middle,
+        // still clear of the unicorn in the bottom-left.
+        const oy = MOBILE ? WORLD_H / 2 - 180 : 0;
+        drawText("GAME OVER", WORLD_W / 2, 50 + oy, 2, "#fff");
+        drawText(score, WORLD_W / 2, 84 + oy, 5, "#fff");
+        drawText(newBest ? "NEW BEST!" : "BEST " + best, WORLD_W / 2, 176 + oy, 2, newBest ? rainbowFlicker() : "#fff");
         ctx.globalAlpha = 0.7 + 0.3 * Math.sin(time * 5);
-        drawText("CLICK OR SPACE TO RETRY", WORLD_W / 2, 214, 1, "#fff");
+        drawText(MOBILE ? "TAP TO RETRY" : "CLICK OR SPACE TO RETRY", WORLD_W / 2, 214 + oy, 1, "#fff");
         ctx.globalAlpha = 1;
       }
     }
@@ -954,23 +1002,29 @@
     setInterval(scheduleMusic, 100);
 
     // ---------------------------------------------------------------------
-    // Input: mouse button or Space. Hold to pull, release to swing. M mutes.
+    // Input: mouse button, touch or Space. Hold to pull, release to swing.
+    // M mutes; on mobile, tapping the mute hint in the top-right corner of
+    // the title screen does. Pointer events cover both mouse and touch.
     // ---------------------------------------------------------------------
-    const isSpaceOrMouse = e => !e.key || e.key === " ";
+    const isSpaceOrPointer = e => !e.key || e.key === " ";
 
     function press(e) {
-      if (e.repeat || !isSpaceOrMouse(e)) return;
+      if (e.repeat || !isSpaceOrPointer(e)) return;
       initAudio();
+      if (MOBILE && !score && state < SWINGING && e.clientX > innerWidth * 0.7 && e.clientY < innerHeight * 0.05) {
+        toggleMute();
+        return;
+      }
       holding = true;
       if (state === GAME_OVER) reset();
       else if (state === IDLE) startPull();
     }
 
-    onmousedown = press;
+    onpointerdown = press;
     onkeydown = e => e.key === "m" || e.key === "M" ? toggleMute() : press(e);
 
-    onmouseup = onkeyup = e => {
-      if (!isSpaceOrMouse(e)) return;
+    onpointerup = onpointercancel = onkeyup = e => {
+      if (!isSpaceOrPointer(e)) return;
       holding = false;
       if (state === PULLING) release();
     };
@@ -987,6 +1041,7 @@
       requestAnimationFrame(frame);
     }
 
+    layout();
     reset();
     frame(0);
   </script>
