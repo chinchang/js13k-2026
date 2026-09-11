@@ -19,15 +19,37 @@
       -webkit-user-select: none;
       -webkit-touch-callout: none;
     }
-    canvas {
+    /* The frame sizes the game: 16:9 letterboxed on desktop, edge to edge on
+       phones (layout() sets it). The canvas fills it. */
+    #frame {
+      position: relative;
       height: min(100vh, 56.25vw);
+      aspect-ratio: 16 / 9;
+      border-radius: 12px;
+      overflow: hidden;
+      --rows: 180;                 /* screen pixel rows, for the scanlines */
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
       image-rendering: pixelated;
       touch-action: none;
+    }
+    /* CRT look: one dark scanline per screen pixel row, and a vignette. */
+    #frame::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(#0000 60%, #0005),
+        linear-gradient(#0000 65%, #0002 65%) 0 0 / 100% calc(100% / var(--rows));
     }
   </style>
 </head>
 <body>
-  <canvas id="screen" width="320" height="180"></canvas>
+  <div id="frame"><canvas id="screen" width="320" height="180"></canvas></div>
   <script>
     // ---------------------------------------------------------------------
     // Swinicorn — a unicorn swings on a candy-cane rope between layer-cake towers.
@@ -69,9 +91,14 @@
     // Landing rules
     const FOOT = 4;                // tolerance from the tower edges
     const PERFECT_WINDOW = 8;      // distance from the tower center for a PERFECT
+    const EDGE_WINDOW = 14;        // landing this close to an edge is a CLOSE call: the unicorn teeters
+    const TENSE_WINDOW = 10;       // a landing this close to the edge rule (either side) plays in slow motion
+    const SLOWMO = 0.3;            // time scale during the slow-motion drop
+    const HOT_COMBO = 3;           // consecutive PERFECTs that put the unicorn "on fire"
 
     // Rainbows float above some towers, on the path of a well-aimed swing.
     const RAINBOW_CHANCE = 0.4;    // fraction of towers that get one
+    const HOT_RAINBOW_CHANCE = 0.8;  // ...while the unicorn is on fire
     const RAINBOW_WINDOW = 20;     // landing this close to a rainbow's x collects it
     const RAINBOW_SINK = 24;       // the arcs are drawn this far below the pickup point, so
                                    // the front hooves (16 px below the feet at that tilt) pass through them
@@ -88,12 +115,18 @@
     const SHAKE_DECAY = 20;        // screen-shake pixels lost per second
     const TRAIL_LENGTH = 24;       // points in the rainbow ribbon behind the swinging unicorn
     const HIT_STOP = 0.06;         // seconds the game freezes on a PERFECT
+    const TEETER_DECAY = 1.2;      // the edge wobble dies out over ~0.8 s
+    const BIRD_INTERVAL = 4;       // seconds between flocks, plus up to as much again
+    const BUTTERFLY_CHANCE = 0.5;  // fraction of towers that get a butterfly
+    const STAR_INTERVAL = 25;      // seconds between shooting sprinkles
 
     // Music: four bars of eighth notes. Letters are semitones above the base
     // pitch (a = 0, b = 1, ...) and "." is a rest.
     const BPM = 150;
     const MELODY = "aehejhecaehmljh.cfjfljfecehmm.h.";
     const BASS = "dkdkdkdkahahahahipipipipkrkrkrkr";
+    const ARP = "aehmhea.aejmjea.fjmqmjf.hloqolh.";   // sparkle layer while on fire: chord tones an octave up
+    const MAX_KEY_SHIFT = 7;       // the music rises a semitone every 10 points, up to a fifth
 
     const GRAVITY = 1800;
     const FAR_LEFT = -1e4;         // "infinitely" far left for extended towers
@@ -102,6 +135,7 @@
     const RAINBOW = ["#ff3b5c", "#ff9f1c", "#ffe14d", "#3ddc84", "#3aa0ff", "#a05cff"];
     const UNICORN = { body: "#ffc6e0", hoof: "#c9a0e0", horn: "#ffd54a", eye: "#5a3a4a" };
     const ROPE_RED = "#ff3b5c";
+    const ORANGE = "#ff9f1c";
     // Palettes cycle every 10 points: [sky, lollipop, clouds, hills, text]
     const PALETTES = [
       ["#fff3c4", "#ff8fb1", "#ffd1e8", "#b8f0d8", "#7a4a5a"],
@@ -122,6 +156,7 @@
     // Canvas setup
     // ---------------------------------------------------------------------
     const canvas = document.getElementById("screen");
+    const crtFrame = document.getElementById("frame");
     const screen = canvas.getContext("2d");
     const buffer = document.createElement("canvas");
     const ctx = buffer.getContext("2d");
@@ -135,13 +170,15 @@
       MOBILE = innerHeight > innerWidth;
       const w = MOBILE ? 400 : 640;
       const h = MOBILE ? Math.round(w * innerHeight / innerWidth / 2) * 2 : 360;
-      canvas.style.width = MOBILE ? innerWidth + "px" : "";
-      canvas.style.height = MOBILE ? innerHeight + "px" : "";
+      crtFrame.style.width = MOBILE ? innerWidth + "px" : "";
+      crtFrame.style.height = MOBILE ? innerHeight + "px" : "";
+      crtFrame.style.borderRadius = MOBILE ? "0" : "";
       if (w === WORLD_W && h === WORLD_H) return;   // desktop resizes change nothing
       WORLD_W = w;
       WORLD_H = h;
       SCREEN_W = WORLD_W / 2;
       SCREEN_H = WORLD_H / 2;
+      crtFrame.style.setProperty("--rows", SCREEN_H);
       ANCHOR_SCREEN_X = WORLD_W / 4;
       TOP_SCREEN_Y = WORLD_H * 5 / 9 | 0;
       buffer.width = WORLD_W;
@@ -190,6 +227,12 @@
     let scorePop = 0;    // HUD score bounce
     let freeze = 0;      // hit-stop seconds remaining
     let time = 0;        // total seconds, for idle animation and color cycling
+    let teeter = 0;      // edge wobble amplitude, 1 = just landed on the edge
+    let teeterDir;       // 1 = the near edge is the front one, -1 = the back one
+    let critters;        // birds (sky space, parallax 0.5), butterflies (world space), shooting sprinkles
+    let birdTimer;       // seconds until the next flock
+    let starTimer;       // seconds until the next shooting sprinkle
+    let pal;             // current palette, picked each frame from the score
 
     const current = () => towers[0];
     const anchorX = () => towers[0].left + towers[0].width;
@@ -220,6 +263,12 @@
         rise: 0,                                       // 0 = still below the screen, 1 = in place
       };
       towers.push(tower);
+      // A flag marks the tower that beats the best score (one per run).
+      if (best && score >= best && !newBest) tower.flagX = tower.left + 8;
+      if (Math.random() < BUTTERFLY_CHANCE) {
+        critters.push({ kind: 1, x: tower.left + Math.random() * width, y: tower.top - 30 - Math.random() * 60,
+          phase: Math.random() * 7, color: RAINBOW[Math.random() * 6 | 0] });
+      }
 
       // A rainbow floats centered over the tower, where a center-aimed swing
       // passes on its way up to the apex. The arc is relative to the tower
@@ -227,7 +276,7 @@
       // (1 - RADIUS_SHRINK) x pull, so the arc crosses the center line at
       // cos(angle) = LANDING_RATIO / (1 - RADIUS_SHRINK), dip x sin(angle)
       // above that top.
-      if (Math.random() < RAINBOW_CHANCE) {
+      if (Math.random() < (hot() ? HOT_RAINBOW_CHANCE : RAINBOW_CHANCE)) {
         const centerPull = (tower.left + width / 2 - anchorX()) / LANDING_RATIO;
         const dip = Math.min(DIP_RATIO * centerPull, MAX_DIP);
         const sinCross = Math.sqrt(1 - (LANDING_RATIO / (1 - RADIUS_SHRINK)) ** 2);
@@ -251,27 +300,44 @@
       trail = [];
       combo = 0;
       newBest = false;
+      teeter = 0;
+      critters = [];
+      birdTimer = 1;
+      starTimer = STAR_INTERVAL / 2;
       spawnTower();
     }
+
+    const hot = () => combo >= HOT_COMBO;   // on fire: glowing mane, wider trail, extra music layer
 
     function startPull() {
       state = PULLING;
       pull = 0;
       lastStep = 0;
+      startCreak();
     }
 
     function release() {
       const ax = anchorX();
       const dip = Math.min(DIP_RATIO * pull, MAX_DIP);
+      const landX = ax + LANDING_RATIO * pull;
+      const target = towers[1];
+      // Distance from the nearer edge of the target (negative = off it). A
+      // landing within TENSE_WINDOW of the edge rule, hit or miss, drops in
+      // slow motion.
+      const edgeDist = Math.min(landX - target.left, target.left + target.width - landX);
       flight = {
         apexX: ax + APEX_X_RATIO * pull,
         apexY: current().top - APEX_Y_RATIO * dip,
-        landX: ax + LANDING_RATIO * pull,
+        landX,
         sweepTime: 0.45 + pull / 2000,
+        tense: Math.abs(edgeDist - FOOT) < TENSE_WINDOW,
+        slowed: false,
       };
       timer = 0;
       state = SWINGING;
       burst(player.x, player.y, 6, 90, { color: "#fff", lift: 80, life: 0.3, gravity: 0 });
+      stopCreak();
+      sfx.twang(pull / MAX_PULL);
       sfx.whoosh();
     }
 
@@ -330,13 +396,17 @@
 
       if (landed) {
         const perfect = Math.abs(x - target.left - target.width / 2) < PERFECT_WINDOW;
+        const edgeDist = Math.min(x - target.left, target.left + target.width - x);
+        const close = edgeDist < EDGE_WINDOW;
+        const wasHot = hot();
+        const oldScore = score;
         combo = perfect ? combo + 1 : 0;
         score += perfect ? 2 : 1;
         scorePop = 1;
         squash = 1;
         popups.push({
-          text: perfect ? "+2 PERFECT" + (combo > 1 ? " X" + combo : "") : "+1",
-          x, y: player.y - 90, life: 0.8, rainbow: perfect,
+          text: perfect ? "+2 PERFECT" + (combo > 1 ? " X" + combo : "") : close ? "CLOSE!" : "+1",
+          x, y: player.y - 90, life: 0.8, color: perfect ? rainbowFlicker : close ? ORANGE : ROPE_RED,
         });
         // Landing dust; a PERFECT adds a rainbow burst, flash, shake and hit-stop.
         burst(x, player.y, 8, 120, { color: "#fff", lift: 60, life: 0.35, gravity: 0 });
@@ -347,6 +417,32 @@
           freeze = HIT_STOP;
         } else {
           shake = 2;
+        }
+        // An edge landing: the unicorn teeters on the hoof nearest the drop.
+        if (close) {
+          teeter = 1;
+          teeterDir = x > target.left + target.width / 2 ? 1 : -1;
+          sfx.wobble();
+        }
+        // Catching fire, and losing it.
+        if (combo === HOT_COMBO) {
+          popups.push({ text: "ON FIRE!", x, y: player.y - 116, life: 1, color: rainbowFlicker });
+          sfx.neigh();
+        } else if (wasHot && !perfect) {
+          const head = bodyPoint(24, -76);
+          burst(head.x, head.y, 10, 60, { color: "#bbb", lift: 40, life: 0.6, gravity: -30 });
+          sfx.fizzle();
+        }
+        // Beating the best mid-run, and every ten points (a new palette and a
+        // higher musical key).
+        if (best && score > best && !newBest) {
+          newBest = true;
+          popups.push({ text: "NEW BEST!", x, y: player.y - 142, life: 1.2, color: rainbowFlicker });
+          burst(x, player.y - 60, 40, 300, { lift: 200, life: 1.5, size: 5 });
+          sfx.newBest();
+        } else if ((score / 10 | 0) > (oldScore / 10 | 0)) {
+          flash = Math.max(flash, 0.3);
+          sfx.milestone();
         }
         // The rope lets go of the unicorn and hangs from the old anchor.
         const hand = handPosition();
@@ -387,12 +483,22 @@
     // Update
     // ---------------------------------------------------------------------
     function update(dt) {
-      time += dt;
       if (freeze > 0) {          // hit-stop: everything holds still for a moment
         freeze -= dt;
         return;
       }
+      // Slow motion for the last two thirds of a drop that will land (or
+      // miss) right at an edge.
+      if (state === SWINGING && flight.tense && timer > flight.sweepTime + DROP_TIME / 3) {
+        dt *= SLOWMO;
+        if (!flight.slowed) {
+          flight.slowed = true;
+          sfx.tense();
+        }
+      }
+      time += dt;
       shake = Math.max(0, shake - SHAKE_DECAY * dt);
+      teeter = Math.max(0, teeter - TEETER_DECAY * dt);
       flash = Math.max(0, flash - 3 * dt);
       squash = Math.max(0, squash - 4 * dt);
       scorePop = Math.max(0, scorePop - 4 * dt);
@@ -414,6 +520,10 @@
           player.x = ax - STAND_OFFSET - pull;
           player.tilt = -0.3 - 0.3 * pull / MAX_PULL;
           cam.x = Math.min(cam.x, player.x - 80);   // camera follows the walk back
+          // The rope creaks louder and higher as it stretches, and the
+          // screen trembles near the limit.
+          setCreak(pull / MAX_PULL);
+          if (pull > 0.85 * MAX_PULL) shake = Math.max(shake, 1.5);
           const step = Math.floor(pull / STEP_LENGTH / Math.PI);
           if (step !== lastStep) {                  // a hoof hits the ground
             lastStep = step;
@@ -506,6 +616,14 @@
       if (state === SWINGING || state === FALLING) trail.push(tailPosition()); else trail.shift();
       if (trail.length > TRAIL_LENGTH) trail.shift();
 
+      // On fire: sparkles drift up off the mane.
+      if (hot() && state !== GAME_OVER && Math.random() < 20 * dt) {
+        const head = bodyPoint(8, -66);
+        burst(head.x, head.y, 1, 25, { lift: 30, life: 0.7, size: 4, gravity: -60 });
+      }
+
+      updateCritters(dt);
+
       popups = popups.filter(p => (p.y -= 60 * dt, (p.life -= dt) > 0));
       rainbows = rainbows.filter(r => {
         if (r.falling) {
@@ -519,6 +637,38 @@
         p.x += p.vx * dt;
         p.y += p.vy * dt;
         return (p.life -= dt) > 0;
+      });
+    }
+
+    // Ambient life. Birds (kind 0) cross the sky in flocks, in sky space
+    // with parallax 0.5; butterflies (kind 1) flutter around a tower in world
+    // space; a shooting sprinkle (kind 2) streaks across now and then.
+    function updateCritters(dt) {
+      if ((birdTimer -= dt) < 0) {
+        birdTimer = BIRD_INTERVAL * (1 + Math.random());
+        const n = 1 + Math.random() * 3 | 0;
+        const y = 20 + Math.random() * 120;
+        const vx = -(30 + Math.random() * 40);
+        for (let i = 0; i < n; i++) {
+          critters.push({ kind: 0, x: cam.x * 0.5 + WORLD_W + 10 + i * 14, y: y + i * 8, vx, phase: i });
+        }
+      }
+      if ((starTimer -= dt) < 0) {
+        starTimer = STAR_INTERVAL * (0.7 + Math.random() * 0.6);
+        critters.push({ kind: 2, x: cam.x * 0.5 + WORLD_W * (0.5 + Math.random() * 0.5), y: -10, vx: -260, vy: 90, life: 1 });
+      }
+      critters = critters.filter(c => {
+        if (c.kind === 1) {
+          c.x += Math.sin(time * 1.5 + c.phase) * 25 * dt;
+          c.y += Math.sin(time * 4 + c.phase) * 15 * dt;
+          return c.x > cam.x - 40 && c.y < cam.y + WORLD_H;
+        }
+        c.x += c.vx * dt;
+        if (c.kind === 2) {
+          c.y += c.vy * dt;
+          return (c.life -= dt) > 0;
+        }
+        return c.x - cam.x * 0.5 > -30;
       });
     }
 
@@ -549,12 +699,49 @@
       ctx.fillStyle = "#fff";
       for (let i = 0; i < 3; i++) ctx.fillRect(WORLD_W - 80, sunY - 12 + i * 10, 48, 4);
 
+      // A striped candy balloon drifts left far behind everything (parallax 0.05).
+      const bx = WORLD_W + 40 - ((time * 10 + cam.x * 0.05 + 360) % (WORLD_W + 300));
+      const by = sunY + 110 + Math.sin(time * 0.7) * 6;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(bx, by, 14, 0, 7);
+      ctx.clip();
+      for (let i = 0; i < 7; i++) {
+        ctx.fillStyle = i % 2 ? "#fff" : pal[1];
+        ctx.fillRect(bx - 14 + i * 4, by - 14, 4, 28);
+      }
+      ctx.restore();
+      ctx.fillStyle = pal[4];
+      ctx.fillRect(bx - 1, by + 14, 2, 8);
+      ctx.fillRect(bx - 4, by + 22, 8, 5);
+
       // Cotton-candy clouds, parallax 0.2
       ctx.fillStyle = pal[2];
       for (let i = 0; i < 4; i++) {
         const x = ((i * 320 - cam.x * 0.2) % 1160 + 1160) % 1160 - 100;
         ctx.fillRect(x, 44 + i * 30, 120, 14);
         ctx.fillRect(x + 20, 30 + i * 30, 60, 14);
+      }
+
+      // Birds and shooting sprinkles live in sky space (parallax 0.5).
+      for (const c of critters) {
+        const x = Math.round(c.x - cam.x * 0.5);
+        if (c.kind === 0) {
+          const flap = Math.round(Math.sin(time * 12 + c.phase) * 3);
+          ctx.fillStyle = pal[4];
+          ctx.globalAlpha = 0.7;
+          ctx.fillRect(x - 8, c.y - flap, 6, 2);
+          ctx.fillRect(x - 2, c.y, 4, 2);
+          ctx.fillRect(x + 2, c.y - flap, 6, 2);
+          ctx.globalAlpha = 1;
+        } else if (c.kind === 2) {
+          for (let i = 0; i < 6; i++) {
+            ctx.fillStyle = i ? RAINBOW[i] : "#fff";
+            ctx.globalAlpha = 1 - i / 6;
+            ctx.fillRect(x + i * 6, c.y - i * 2, 4, 4);
+          }
+          ctx.globalAlpha = 1;
+        }
       }
 
       // Mint hills, parallax 0.3
@@ -588,7 +775,41 @@
       ctx.fillStyle = "#fff";
       ctx.fillRect(left, top, width, 14);
       for (let d = 4; d < width - 6; d += 14) ctx.fillRect(left + d, top + 14, 6, 6 + d * 7 % 12);
+
+      // The best-score flag: a pole with a fluttering pennant and a label.
+      if (t.flagX) {
+        const x = t.flagX;
+        ctx.fillStyle = pal[4];
+        ctx.fillRect(x, top - 44, 2, 44);
+        ctx.fillStyle = ROPE_RED;
+        ctx.beginPath();
+        ctx.moveTo(x + 2, top - 44);
+        ctx.lineTo(x + 22 + Math.sin(time * 8) * 3, top - 37);
+        ctx.lineTo(x + 2, top - 30);
+        ctx.fill();
+        drawText("BEST", x + 1, top - 60, 1, pal[4]);
+      }
     }
+
+    // Butterflies flutter in world space near the towers.
+    function drawButterflies() {
+      for (const c of critters) {
+        if (c.kind !== 1) continue;
+        const open = Math.sin(time * 16 + c.phase) > 0;
+        const x = Math.round(c.x), y = Math.round(c.y);
+        ctx.fillStyle = c.color;
+        if (open) {
+          ctx.fillRect(x - 7, y - 3, 6, 6);
+          ctx.fillRect(x + 1, y - 3, 6, 6);
+        } else {
+          ctx.fillRect(x - 4, y - 4, 3, 6);
+          ctx.fillRect(x + 1, y - 4, 3, 6);
+        }
+        ctx.fillStyle = pal[4];
+        ctx.fillRect(x - 1, y - 4, 2, 8);
+      }
+    }
+
 
     // Six arcs of `band` thickness with a cloud puff at each end; (x, y) is
     // the center of the baseline.
@@ -624,12 +845,13 @@
     // Six colored stripes along the recent tail positions.
     function drawTrail() {
       if (trail.length < 2) return;
-      ctx.lineWidth = 3;
+      const band = hot() ? 5 : 3;    // the ribbon widens while on fire
+      ctx.lineWidth = band;
       ctx.globalAlpha = 0.8;
       RAINBOW.forEach((color, i) => {
         ctx.strokeStyle = color;
         ctx.beginPath();
-        trail.forEach((p, j) => ctx[j ? "lineTo" : "moveTo"](p.x, p.y + i * 3 - 8));
+        trail.forEach((p, j) => ctx[j ? "lineTo" : "moveTo"](p.x, p.y + (i - 2.5) * band));
         ctx.stroke();
       });
       ctx.globalAlpha = 1;
@@ -641,15 +863,19 @@
       const end = state === LANDED ? ropeEnd : hand;
       const taut = state === SWINGING || state === PANNING || state === FALLING || state === LANDED;
       const dist = Math.hypot(hand.x - anchor.x, hand.y - anchor.y);
-      const sagY = taut
+      let sagY = taut
         ? (anchor.y + end.y) / 2 + Math.max(0, pull - dist) * 0.15 + 4
         : anchor.y + 2;   // lying along the tower top
+      // While pulling, the white of the candy cane reddens with the tension
+      // and the rope trembles past half stretch.
+      const tension = state === PULLING ? pull / MAX_PULL : 0;
+      if (tension > 0.5) sagY += (Math.random() - 0.5) * 8 * (tension - 0.5);
 
       ctx.beginPath();
       ctx.moveTo(anchor.x, anchor.y + 3);
       ctx.quadraticCurveTo((anchor.x + end.x) / 2, sagY, end.x, end.y);
       ctx.lineWidth = 6;
-      ctx.strokeStyle = "#fff";
+      ctx.strokeStyle = `hsl(350 100% ${100 - 45 * tension}%)`;
       ctx.stroke();
       ctx.setLineDash([8, 8]);
       ctx.strokeStyle = ROPE_RED;
@@ -658,8 +884,9 @@
     }
 
     // Pixel unicorn parts, feet at the origin, facing right. `phase` drives
-    // the walk cycle, `bob` lifts the body, `sad` gives a teary face.
-    function drawUnicornParts(phase, bob, sad) {
+    // the walk cycle, `bob` lifts the body, `sad` gives a teary face, `shift`
+    // rotates the mane and tail colors (cycled while on fire).
+    function drawUnicornParts(phase, bob, sad, shift) {
       // Walk cycle: alternate leg pairs swing and lift. Driven by distance,
       // not time, so the steps match the walking speed.
       const swing = Math.sin(phase) * 5;
@@ -700,8 +927,8 @@
       }
 
       // Rainbow mane down the neck and tail off the back
-      RAINBOW.forEach((color, i) => {
-        ctx.fillStyle = color;
+      RAINBOW.forEach((_, i) => {
+        ctx.fillStyle = RAINBOW[(i + shift) % 6];
         ctx.fillRect(2, -70 + i * 5, 6, 5);
         ctx.fillRect(-30 + i * 2, -42 + i * 4, 8, 5);
       });
@@ -711,6 +938,13 @@
       ctx.save();
       ctx.translate(player.x, player.y);
       ctx.rotate(player.tilt);
+      // Edge teeter: a dying wobble pivoting on the hoof nearest the drop.
+      if (teeter) {
+        const pivot = teeterDir > 0 ? 18 : -20;
+        ctx.translate(pivot, 0);
+        ctx.rotate(teeterDir * Math.sin(time * 18) * 0.3 * teeter);
+        ctx.translate(-pivot, 0);
+      }
       // Landing squash: wider and shorter, springing back.
       const s = squash * squash;
       ctx.scale(1 + 0.35 * s, 1 - 0.35 * s);
@@ -719,7 +953,7 @@
       const phase = walking ? pull / STEP_LENGTH : 0;
       const bob = walking ? Math.abs(Math.cos(phase)) * 2      // steps
         : state === IDLE ? 1 + Math.sin(time * 6) : 0;         // breathing
-      drawUnicornParts(phase, bob, false);
+      drawUnicornParts(phase, bob, false, hot() ? (time * 12 | 0) % 6 : 0);
       ctx.restore();
     }
 
@@ -729,7 +963,7 @@
       ctx.translate(76, WORLD_H + 230);
       ctx.rotate(-0.35);
       ctx.scale(5.2, 5.2);
-      drawUnicornParts(0, 0, true);
+      drawUnicornParts(0, 0, true, 0);
       ctx.restore();
     }
 
@@ -803,7 +1037,7 @@
     function drawPopups() {
       for (const p of popups) {
         ctx.globalAlpha = Math.min(1, p.life * 2);
-        drawText(p.text, p.x, p.y, 2, p.rainbow ? rainbowFlicker() : ROPE_RED);
+        drawText(p.text, p.x, p.y, 2, p.color);
       }
       ctx.globalAlpha = 1;
     }
@@ -860,13 +1094,14 @@
     }
 
     function draw() {
-      const pal = PALETTES[(score / 10 | 0) % PALETTES.length];
+      pal = PALETTES[(score / 10 | 0) % PALETTES.length];
       drawBackground(pal);
 
       ctx.save();
       ctx.translate(-cam.x, -cam.y);
       drawTower(prevTower);
       for (const t of towers) drawTower(t);
+      drawButterflies();
       drawRainbows();
       drawTrail();
       drawRope();
@@ -917,8 +1152,9 @@
       if (master) master.gain.value = muted ? 0 : 1;
     }
 
-    // One oscillator note sliding from `from` to `to` Hz, fading out over `duration`.
-    function tone(type, from, to, duration, volume = 0.15, delay = 0) {
+    // One oscillator note sliding from `from` to `to` Hz, fading out over
+    // `duration`. `vibrato` is [rate Hz, depth Hz] for a warble.
+    function tone(type, from, to, duration, volume = 0.15, delay = 0, vibrato) {
       if (!audio) return;
       const t = audio.currentTime + delay;
       const osc = audio.createOscillator();
@@ -931,6 +1167,44 @@
       osc.connect(gain).connect(master);
       osc.start(t);
       osc.stop(t + duration);
+      if (vibrato) {
+        const lfo = audio.createOscillator();
+        const depth = audio.createGain();
+        lfo.frequency.value = vibrato[0];
+        depth.gain.value = vibrato[1];
+        lfo.connect(depth).connect(osc.frequency);
+        lfo.start(t);
+        lfo.stop(t + duration);
+      }
+    }
+
+    // The rope creak: a low sawtooth rattle that runs for the whole pull,
+    // rising in pitch and volume with the tension.
+    let creak;           // {osc, gain} while pulling
+    function startCreak() {
+      if (!audio || creak) return;
+      const osc = audio.createOscillator();
+      const filter = audio.createBiquadFilter();
+      const gain = audio.createGain();
+      osc.type = "sawtooth";
+      osc.frequency.value = 25;
+      filter.frequency.value = 500;
+      gain.gain.value = 0;
+      osc.connect(filter).connect(gain).connect(master);
+      osc.start();
+      creak = { osc, gain };
+    }
+    function setCreak(tension) {
+      if (!creak) return;
+      creak.osc.frequency.value = 25 + 70 * tension * tension;
+      creak.gain.gain.value = Math.max(0, tension - 0.2) * 0.15;
+    }
+    function stopCreak() {
+      if (!creak) return;
+      const t = audio.currentTime;
+      creak.gain.gain.setTargetAtTime(0, t, 0.02);
+      creak.osc.stop(t + 0.1);
+      creak = null;
     }
 
     // White noise through a band-pass filter sweeping from `from` to `to` Hz.
@@ -970,7 +1244,22 @@
       fall: () => tone("sawtooth", 500, 100, 0.6, 0.08),
       rainbow: () => [523, 659, 784, 1047].forEach((f, i) => tone("square", f, f, 0.1, 0.08, i * 0.06)),
       boing: () => tone("sine", 200, 700, 0.15, 0.15),
-      gameOver: () => [330, 262, 196].forEach((f, i) => tone("square", f, f * 0.98, 0.25, 0.1, i * 0.2)),
+      twang: tension => tone("triangle", 60 + 160 * tension, 30, 0.2, 0.15 * tension),
+      wobble: () => tone("sine", 420, 380, 0.5, 0.1, 0, [12, 90]),          // teetering warble
+      tense: () => tone("sine", 200, 700, 0.5, 0.06),                       // slow-motion riser
+      neigh: () => tone("sawtooth", 900, 420, 0.4, 0.07, 0, [22, 70]),
+      fizzle: () => noise(0.35, 2500, 200, 0.12),
+      newBest: () => [523, 659, 784, 1047, 1319].forEach((f, i) => tone("square", f, f, i < 4 ? 0.12 : 0.5, 0.07, i * 0.08)),
+      milestone: () => [1, 1.25, 1.5, 2].forEach((r, i) => tone("triangle", 660 * r * key(), 660 * r * key(), 0.2, 0.1, i * 0.07)),
+      // Tape stop: the notes playing right now slide down, then the sting.
+      gameOver: () => {
+        const i = (musicStep + MELODY.length - 1) % MELODY.length;
+        const f = pitch(MELODY[i] === "." ? "a" : MELODY[i], 523) * key();
+        tone("square", f, f / 6, 0.7, 0.05);
+        tone("triangle", pitch(BASS[i], 110) * key(), 20, 0.7, 0.12);
+        noise(0.6, 3000, 80, 0.1);
+        [330, 262, 196].forEach((f, i) => tone("square", f, f * 0.98, 0.25, 0.1, 0.6 + i * 0.2));
+      },
     };
 
     // ---------------------------------------------------------------------
@@ -981,6 +1270,8 @@
     let musicTime = 0;             // audio clock time of the next step
     let musicStep = 0;
     const pitch = (letter, base) => base * 2 ** ((letter.charCodeAt() - 97) / 12);
+    // The whole tune steps up a semitone every ten points.
+    const key = () => 2 ** (Math.min(score / 10 | 0, MAX_KEY_SHIFT) / 12);
 
     function scheduleMusic() {
       if (!audio) return;
@@ -992,8 +1283,11 @@
         const i = musicStep++ % MELODY.length;
         const delay = musicTime - audio.currentTime;
         const note = MELODY[i];
-        if (note !== ".") tone("square", pitch(note, 523), pitch(note, 523), STEP_TIME * 0.9, 0.04, delay);
-        tone("triangle", pitch(BASS[i], 110), pitch(BASS[i], 110), STEP_TIME * 0.8, 0.12, delay);
+        const k = key();
+        if (note !== ".") tone("square", pitch(note, 523) * k, pitch(note, 523) * k, STEP_TIME * 0.9, 0.04, delay);
+        tone("triangle", pitch(BASS[i], 110) * k, pitch(BASS[i], 110) * k, STEP_TIME * 0.8, 0.12, delay);
+        // On fire: a sparkling arpeggio an octave up joins in.
+        if (hot() && ARP[i] !== ".") tone("square", pitch(ARP[i], 1046) * k, pitch(ARP[i], 1046) * k, STEP_TIME * 0.5, 0.025, delay);
         if (i % 4 === 0) tone("sine", 150, 40, 0.1, 0.3, delay);   // kick on the beat
         noise(0.03, 7000, 7000, i % 2 ? 0.02 : 0.04, delay);       // hi-hat
         musicTime += STEP_TIME;
