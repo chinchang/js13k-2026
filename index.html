@@ -1010,6 +1010,7 @@
       9: ".###.|#...#|#...#|.####|....#|...#.|###..",
       "+": ".....|..#..|..#..|#####|..#..|..#..|.....",
       "-": ".....|.....|.....|#####|.....|.....|.....",
+      "/": "....#|....#|...#.|..#..|.#...|#....|#....",
       "!": "..#..|..#..|..#..|..#..|..#..|.....|..#..",
       ".": ".....|.....|.....|.....|.....|.....|..#..",
       ":": ".....|..#..|..#..|.....|..#..|..#..|.....",
@@ -1051,10 +1052,12 @@
         drawText("SWINICORN", WORLD_W / 2 + 4, 44, logo, ink);
         drawText("SWINICORN", WORLD_W / 2, 40, logo, i => RAINBOW[i % 6]);
         ctx.globalAlpha = 0.7 + 0.3 * Math.sin(time * 5);
-        // Prompt sits right of the unicorn, between the logo and the first
-        // rainbow; on a portrait screen it is centered, halfway down to the tower.
-        if (MOBILE) drawText("HOLD TO PULL - RELEASE TO SWING", WORLD_W / 2, TOP_SCREEN_Y / 2, 1, ink);
-        else drawText("HOLD TO PULL - RELEASE TO SWING", (WORLD_W + ANCHOR_SCREEN_X) / 2, 128, 1, ink);
+        // Prompt is centered under the logo; on a portrait screen it sits
+        // halfway down to the tower.
+        const px = WORLD_W / 2;
+        const py = MOBILE ? TOP_SCREEN_Y / 2 - 8 : 120;
+        drawText(MOBILE ? "HOLD TO PULL" : "HOLD LCLICK/SPACE TO PULL", px, py, 1, ink);
+        drawText("RELEASE TO SWING", px, py + 18, 1, ink);
         ctx.globalAlpha = 0.6;
         if (best) drawText("BEST " + best, 12, 30, 1, ink, 0);
         // Mute hint: the M key on desktop, a tap on the hint itself on mobile.
@@ -1064,7 +1067,7 @@
         ctx.fillStyle = pal[0];
         ctx.fillRect(0, WORLD_H - 26, WORLD_W, 26);
         ctx.globalAlpha = 0.6;
-        drawText("A JS13K GAME BY KUSHAGRA GOUR", WORLD_W - 12, WORLD_H - 20, 1, ink, 1);
+        drawText("A JS13K GAME BY KUSHAGRA GOUR", WORLD_W / 2, WORLD_H - 20, 1, ink);
         ctx.globalAlpha = 1;
       } else if (state !== GAME_OVER) {
         const lift = Math.round(6 * scorePop) * 2;    // bounces up on each point
@@ -1074,7 +1077,7 @@
       // Rainbow counter, top left. The icon hops when one is collected.
       if (state !== GAME_OVER) {
         drawRainbowArcs(24, 22 - Math.round(4 * rainbowPop) * 2, 2);
-        drawText(collected, 44, 12, 1, ink, 0);
+        drawText(collected, 44, 10, 1, ink, 0);
       }
 
       if (state === GAME_OVER) {
