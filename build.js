@@ -23,7 +23,8 @@ async function build() {
   const title = pick(/<title>([\s\S]*?)<\/title>/);
   const css = pick(/<style>([\s\S]*?)<\/style>/);
   const js = pick(/<script>([\s\S]*?)<\/script>/);
-  const canvas = pick(/(<canvas[^>]*>)/).replace(/="([^"\s]+)"/g, "=$1");
+  // Frame wrapper plus canvas; the script looks both up by id.
+  const canvas = pick(/(<div id="frame">[\s\S]*?<\/div>)/).replace(/="([^"\s]+)"/g, "=$1");
 
   const minCss = css
     .replace(/\s+/g, " ")
@@ -51,7 +52,7 @@ async function build() {
   const html =
     `<!doctype html><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">` +
     `<title>${title}</title><style>${minCss}</style>` +
-    `${canvas}</canvas><script>${result.code}</script>`;
+    `${canvas}<script>${result.code}</script>`;
   fs.writeFileSync(OUT, html);
 
   const raw = Buffer.byteLength(html);
