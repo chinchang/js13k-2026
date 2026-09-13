@@ -241,8 +241,9 @@
       const difficulty = Math.min(score / 40, 1);
       const last = towers[towers.length - 1];
       // Widths run 44-120 px early and 44-84 px at full difficulty; the
-      // minimum is the span of the unicorn's four legs.
-      const width = MIN_WIDTH + Math.random() * (120 - MIN_WIDTH - difficulty * 36) | 0;
+      // minimum is the span of the unicorn's four legs. The very first tower
+      // of a game (score 0) is always a fat one so the opening swing is easy.
+      const width = score ? MIN_WIDTH + Math.random() * (120 - MIN_WIDTH - difficulty * 36) | 0 : 96 + Math.random() * 24 | 0;
       // Thin towers are hard to hit, so they start out close to the unicorn
       // and drift farther as the score climbs. Wide towers can be far from
       // the start. thinness: 0 = widest, 1 = thinnest.
@@ -519,6 +520,9 @@
           pull = Math.min(pull + PULL_SPEED * dt, MAX_PULL);
           player.x = ax - STAND_OFFSET - pull;
           player.tilt = -0.3 - 0.3 * pull / MAX_PULL;
+          const k = Math.min(1, dt * 6);
+          cam.x += (cam.targetX - cam.x) * k;       // finish any pan still in flight
+          cam.y += (cam.targetY - cam.y) * k;
           cam.x = Math.min(cam.x, player.x - 80);   // camera follows the walk back
           // The rope creaks louder and higher as it stretches, and the
           // screen trembles near the limit.
@@ -592,12 +596,21 @@
           cam.x += (cam.targetX - cam.x) * k;
           cam.y += (cam.targetY - cam.y) * k;
           player.x += (walkTargetX - player.x) * k;
-          if (Math.abs(cam.targetX - cam.x) < 0.5) {
+          const remaining = Math.abs(cam.targetX - cam.x);
+          if (remaining < 0.5) {
             cam.x = cam.targetX;
             cam.y = cam.targetY;
             player.x = walkTargetX;
             state = IDLE;
             if (holding) startPull();
+          } else if (holding && remaining < 24 && towers[1].rise > 0.75) {
+            // The ease-out tail of the pan takes a while; a held button may
+            // start pulling once the pan is mostly done and the next tower
+            // is mostly up. The pull begins from where the unicorn stands so
+            // the walk back starts without a hitch, and the camera finishes
+            // its glide during the pull.
+            startPull();
+            pull = Math.max(0, walkTargetX - player.x);
           }
           break;
         }
