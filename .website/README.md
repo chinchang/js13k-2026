@@ -10,3 +10,5 @@ Controls
 
 Fun:
 - Rainbows float above some towers. Land close to one to collect it. Your all-time count is kept between sessions.
+
+Wavedash entry - https://wavedash.com/games/swinicorn
